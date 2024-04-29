@@ -23,20 +23,29 @@ class Perceptron(nn.Module):
 
 
 class TransitionModel(nn.Module):
-    def __init__(self, act_dim, state_dim, latent_dim, pe_wavelength_range=[1, 1024]):
+    def __init__(
+        self,
+        act_dim,
+        state_dim,
+        latent_dim,
+        n_heads=4,
+        n_layers=3,
+        pe_wavelength_range=[1, 1024],
+    ):
         super().__init__()
-        n_layers = 3
+        self.n_layers = n_layers
+        self.n_heads = n_heads
         self.sa_layers = nn.ModuleList(
             [
-                nn.MultiheadAttention(latent_dim, 4, batch_first=True)
-                for _ in range(n_layers)
+                nn.MultiheadAttention(latent_dim, self.n_heads, batch_first=True)
+                for _ in range(self.n_layers)
             ]
         )
         self.up_scales = nn.ModuleList(
-            [nn.Linear(latent_dim, latent_dim * 4) for _ in range(n_layers)]
+            [nn.Linear(latent_dim, latent_dim * 4) for _ in range(self.n_layers)]
         )
         self.down_scales = nn.ModuleList(
-            [nn.Linear(latent_dim * 4, latent_dim) for _ in range(n_layers)]
+            [nn.Linear(latent_dim * 4, latent_dim) for _ in range(self.n_layers)]
         )
         self.up_scale = nn.Linear(state_dim + act_dim, latent_dim)
         self.down_scale = nn.Linear(latent_dim, state_dim)
@@ -69,17 +78,20 @@ class TransitionModel(nn.Module):
         seq_len = actions.shape[-2]
         # Compute the positional encoding
         times = torch.arange(seq_len, device=x.device) - start_indices[..., None]
-        pe_freq_mat = einsum(pe_freqs, times, "w, ... i -> i w")
+        pe_freq_mat = einsum(pe_freqs, times, "freq, ... time -> ... time freq")
         pe = torch.cat([torch.sin(pe_freq_mat), torch.cos(pe_freq_mat)], dim=-1)
         x = x + pe
 
         # Make a mask out to mask out the past
         mask = torch.zeros(batch_size, seq_len, device=x.device, dtype=torch.bool)
         mask[torch.arange(batch_size), start_indices] = True
-        mask = ~mask.cumsum(dim=-1) > 0
+        mask = ~(mask.cumsum(dim=-1) > 0)
 
         big_mask = repeat(
-            mask, "i seq ... -> (i heads) seq seq_also ...", heads=4, seq_also=seq_len
+            mask,
+            "i seq ... -> (i heads) seq_also seq ...",
+            heads=self.n_heads,
+            seq_also=seq_len,
         )
 
         for up_scale, sa_layer, down_scale in zip(
@@ -159,7 +171,7 @@ class ActorPolicy(nn.Module):
         next_action = self.action_decoder(
             torch.cat([latent_action_plan[..., 0, :], latent_state], dim=-1)
         )
-        
+
         # Pop the first action and append a new one
         new_end_action = gen_latent_actions(1)
         latent_action_plan = torch.cat(

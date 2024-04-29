@@ -1,3 +1,4 @@
 data.npz
 *.pyc
 trained_net_params/*
+.vscode/launch.json

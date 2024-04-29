@@ -1,3 +1,5 @@
+import argparse
+
 import gymnasium as gym
 import numpy as np
 import torch
@@ -20,8 +22,7 @@ def train(
     states,
     actions,
 ):
-
-    # Now launch the training loop
+    """Train the networks."""
 
     action_mse = nn.MSELoss()
     state_mse = nn.MSELoss()
@@ -47,7 +48,6 @@ def train(
                 action_encoder,
                 state_decoder,
                 action_decoder,
-                transition_model, # Temporarily adding this back to see
             ]
             for param in net.parameters()
         ],
@@ -59,23 +59,21 @@ def train(
         last_epoch=-1,
     )
 
-    # transformer_optimizer = torch.optim.AdamW(transition_model.parameters(), lr=1e-2)
+    transformer_optimizer = torch.optim.AdamW(
+        transition_model.parameters(),
+        lr=1e-4,
+    )
+    transformer_lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        transformer_optimizer,
+        factor=0.5,
+        patience=16,
+        threshold=1e-4,
+    )
 
-    # transformer_lr_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    #     transformer_optimizer,
-    #     factor=0.5,
-    #     patience=128,
-    #     threshold=1e-4,
-    #     threshold_mode="rel",
-    #     cooldown=8,
-    #     min_lr=1e-6,
-    #     eps=1e-8,
-    #     verbose=True,
-    # )
     encoder_batch_size = 4096
     transition_batch_size = 64
 
-    for i in tqdm(range(2048), disable=True):
+    for i in tqdm(range(1024), disable=True):
 
         # Yoink a batch of data
         encoder_batch_raveled_inds = torch.randperm(np.prod(states.shape[:-1]))[
@@ -106,7 +104,7 @@ def train(
 
         # Now do a forward pass
         perceptron_optimizer.zero_grad()
-        # transformer_optimizer.zero_grad()
+        transformer_optimizer.zero_grad()
 
         latent_states = state_encoder(state_batch)
         latent_actions = action_encoder(torch.cat([action_batch, state_batch], dim=-1))
@@ -172,69 +170,36 @@ def train(
         perceptron_loss = (
             state_reconstruction_loss
             + action_reconstruction_loss
-            + transition_loss  # Temporarily adding this back to see
             + smoothness_loss
             + coverage_loss * 0.01
         )
 
-        if True:  # i < 1024: This is a temporary hack to train the transformer first
-            perceptron_loss.backward()
-            perceptron_optimizer.step()
-            perceptron_lr_scheduler.step()
+        perceptron_loss.backward()
+        perceptron_optimizer.step()
+        perceptron_lr_scheduler.step()
 
-        # Now do a forward pass for the transformer (or a few)
+        # Now do a forward pass for the transformer
+        transformer_optimizer.zero_grad()
+        perceptron_optimizer.zero_grad()
 
-        for _ in range(0):  # (16):
+        latent_start_states = state_encoder(starting_states)
+        latent_traj_actions = action_encoder(
+            torch.cat([action_traj_batch, state_traj_batch], dim=-1)
+        )
+        latent_fut_states_prime = transition_model(
+            latent_start_states,
+            latent_traj_actions,
+            start_indices=transition_start_inds,
+        )
+        latent_fut_states_gt = state_encoder(state_traj_batch)
 
-            transition_traj_batch_inds = torch.randperm(states.shape[0], device="cuda")[
-                :transition_batch_size
-            ]
-            transition_start_inds = torch.randint(
-                0,
-                int(states.shape[-2] // 1.1),
-                (transition_batch_size,),
-                device="cuda",
-            )
-            starting_states = states[
-                transition_traj_batch_inds, transition_start_inds
-            ].to("cuda")
-            state_traj_batch = states[transition_traj_batch_inds].to("cuda")
-            action_traj_batch = actions[transition_traj_batch_inds].to("cuda")
+        transition_loss = transition_loss_func(
+            latent_fut_states_prime, latent_fut_states_gt, mask
+        )
 
-            transition_traj_batch_inds = torch.randperm(states.shape[0], device="cuda")[
-                :transition_batch_size
-            ]
-            transition_start_inds = torch.randint(
-                0,
-                int(states.shape[-2] // 1.1),
-                (transition_batch_size,),
-                device="cuda",
-            )
-            perceptron_optimizer.zero_grad()
-            transformer_optimizer.zero_grad()
-
-            latent_fut_states_gt = state_encoder(state_traj_batch)
-
-            latent_start_states = state_encoder(starting_states)
-            latent_traj_actions = action_encoder(
-                torch.cat([action_traj_batch, state_traj_batch], dim=-1)
-            )
-
-            latent_fut_states_prime, mask = transition_model(
-                latent_start_states,
-                latent_traj_actions,
-                start_indices=transition_start_inds,
-                return_mask=True,
-            )
-            latent_fut_states_gt = state_encoder(state_traj_batch)
-
-            transition_loss = transition_loss_func(
-                latent_fut_states_prime, latent_fut_states_gt, mask
-            )
-
-            transition_loss.backward()
-            transformer_optimizer.step()
-            transformer_lr_scheduler.step(transition_loss.item())
+        transition_loss.backward()
+        # transformer_lr_scheduler.step(transition_loss)
+        transformer_optimizer.step()
 
         if i % 16 == 0:
             print(
@@ -252,8 +217,11 @@ def train(
 
 if __name__ == "__main__":
 
+    # Not sure why but torch told me to do this
+    torch.set_float32_matmul_precision("high")
     # Set random seed
     np_rng = np.random.default_rng(0)
+    torch.manual_seed(0)
 
     # Load data from data.npz
     data = np.load("data.npz")
@@ -281,8 +249,8 @@ if __name__ == "__main__":
     state_dim = observations_train.shape[-1]
     action_dim = actions_train.shape[-1]
 
-    transition_model_raw = TransitionModel(
-        2, 4, 16, 1, pe_wavelength_range=[1, 2048]
+    transition_model = TransitionModel(
+        2, 4, 32, 4, pe_wavelength_range=[1, 2048]
     ).cuda()
 
     state_encoder = Perceptron(state_dim, [32, 64, 32], state_dim).cuda()
@@ -290,18 +258,10 @@ if __name__ == "__main__":
     state_decoder = Perceptron(state_dim, [32, 64, 32], state_dim).cuda()
     action_decoder = Perceptron(action_dim + state_dim, [32, 32, 32], action_dim).cuda()
 
-    # Load models, this is temporary
-    state_encoder = torch.load("trained_net_params/state_encoder.pt")
-    action_encoder = torch.load("trained_net_params/action_encoder.pt")
-    # transiton_model_raw = torch.load("trained_net_params/transition_model.pt")
-    state_decoder = torch.load("trained_net_params/state_decoder.pt")
-    action_decoder = torch.load("trained_net_params/action_decoder.pt")
-
     train(
         state_encoder,
         action_encoder,
-        # torch.compile(transition_model_raw),
-        transition_model_raw,
+        torch.compile(transition_model),
         state_decoder,
         action_decoder,
         observations_train,
@@ -309,11 +269,11 @@ if __name__ == "__main__":
     )
 
     # Save the models
-    # torch.save(state_encoder, "trained_net_params/state_encoder.pt")
-    # torch.save(action_encoder, "trained_net_params/action_encoder.pt")
-    torch.save(transition_model_raw, "trained_net_params/transition_model.pt")
-    # torch.save(state_decoder, "trained_net_params/state_decoder.pt")
-    # torch.save(action_decoder, "trained_net_params/action_decoder.pt")
+    torch.save(state_encoder, "trained_net_params/state_encoder.pt")
+    torch.save(action_encoder, "trained_net_params/action_encoder.pt")
+    torch.save(transition_model, "trained_net_params/transition_model.pt")
+    torch.save(state_decoder, "trained_net_params/state_decoder.pt")
+    torch.save(action_decoder, "trained_net_params/action_decoder.pt")
 
     # Save the train test split
     np.savez(

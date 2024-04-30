@@ -5,7 +5,7 @@ from torch import nn
 
 
 class TransitionLoss(nn.Module):
-    def __init__(self, loss_fn=nn.MSELoss()):
+    def __init__(self, loss_fn=nn.HuberLoss()):
         super().__init__()
         self.loss_fn = loss_fn
 
@@ -18,10 +18,11 @@ class TransitionLoss(nn.Module):
 
 
 class SmoothnessLoss(nn.Module):
-    def __init__(self, norm_p=1, discount=0.99):
+    def __init__(self, norm_p=1, discount=0.99, loss_fn=nn.HuberLoss()):
         super().__init__()
         self.discount = discount
         self.norm_p = norm_p
+        self.loss_fn = loss_fn
 
     def forward(
         self,
@@ -40,11 +41,18 @@ class SmoothnessLoss(nn.Module):
         future_indices = torch.cumsum(~mask, dim=-1, dtype=torch.float32)
         future_discounts = self.discount**future_indices
         dist_limits = action_dists / future_discounts
-        state_violations = torch.relu(state_dists - dist_limits)
-        losses = state_violations**2
-        masked_losses = torch.where(mask, 0, losses)
+        state_violations = torch.relu(state_dists - dist_limits) / (dist_limits + 1e-3) # Add constant to avoid exploding gradients
+        loss_input = torch.where(mask, 0, state_violations)
+        # Scale the loss for future elements only
+        loss = (
+            self.loss_fn(
+                loss_input, torch.zeros_like(loss_input)
+            ).mean()  # The mean huber loss
+            * np.prod(mask.shape)  # The mean denominator
+            / torch.sum(~mask)  # Number of non-zero elements
+        )
 
-        return masked_losses.mean()
+        return loss
 
 
 class CoverageLoss(nn.Module):

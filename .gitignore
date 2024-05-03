@@ -1,7 +1,7 @@
 data.npz
 *.pyc
 trained_net_params/*
-.vscode/launch.json
+.vscode/*
 wandb
 wandb/*
 *.fls
@@ -11,3 +11,4 @@ wandb/*
 *.out
 *.synctex.gz
 legato.egg-info/*
+writeup.pdf

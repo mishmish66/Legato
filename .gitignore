@@ -4,3 +4,9 @@ trained_net_params/*
 .vscode/launch.json
 wandb
 wandb/*
+*.fls
+*.fdb_latexmk
+*.aux
+*.log
+*.out
+*.synctex.gz

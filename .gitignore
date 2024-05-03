@@ -10,3 +10,4 @@ wandb/*
 *.log
 *.out
 *.synctex.gz
+legato.egg-info/*

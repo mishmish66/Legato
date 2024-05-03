@@ -4,13 +4,14 @@ import gymnasium as gym
 import numpy as np
 import torch
 import torch.autograd.profiler as profiler
-import wandb
 from einops import einsum, pack, rearrange, repeat
 from torch import nn
 from tqdm import tqdm
 
-from loss import CoverageLoss, SmoothnessLoss, TransitionLoss
-from nets import Perceptron, TransitionModel
+import wandb
+from legato.loss import CoverageLoss, SmoothnessLoss, TransitionLoss, CondensationLoss
+from legato.nets import DoublePerceptron, Perceptron, TransitionModel
+from legato.sampler import PBallSampler
 
 
 def train(
@@ -21,40 +22,58 @@ def train(
     action_decoder,
     states,
     actions,
+    states_test,
+    actions_test,
     np_rng,
+    state_space_size=2.0,
+    action_space_size=1.0,
 ):
     """Train the networks."""
 
+    perturbation_generator = PBallSampler(2, 1, device="cuda")
+    latent_action_sampler = PBallSampler(2, 1, device="cuda")
+    latent_state_sampler = PBallSampler(4, 1, device="cuda")
+    latent_action_state_sampler = lambda n: (
+        latent_action_sampler(n),
+        latent_state_sampler(n),
+    )
+
     action_mse = nn.MSELoss()
     state_mse = nn.MSELoss()
+
     transition_loss_func = torch.compile(TransitionLoss())
 
     smoothness_loss_func = SmoothnessLoss()
 
-    coverage_loss_func = torch.compile(
-        CoverageLoss(
-            state_space_size=1.5,
-            action_space_size=1.75,
-            latent_samples=16_384,
-            # latent_state_samples=1024,
-            # latent_action_samples=1024,
-        )
+    state_coverage_loss_func = torch.compile(
+        CoverageLoss(state_decoder, latent_state_sampler, k=16)
+    )
+    action_coverage_loss_func = torch.compile(
+        CoverageLoss(action_decoder, latent_action_state_sampler, k=16)
+    )
+    condensation_loss_func = CondensationLoss(
+        state_space_size=state_space_size,
+        action_space_size=action_space_size,
     )
 
-    epoch_state_actions = int(1e6)
-    epoch_trajectories = int(1e4)
+    epoch_state_actions = int(5e5)
+    epoch_trajectories = int(5e3)
 
-    encoder_batch_size = 4096
-    transition_batch_size = 256
+    encoder_batch_size = 1024
+    transition_batch_size = 128
+
+    test_epoch_steps = 8
+
+    encoder_grad_skips = 16
 
     encoder_epochs = 1
-    transition_epochs = 4
+    transition_epochs = 1
 
     train_epochs = 256
 
     transition_warmup_epochs = 1
-    encoder_warmup_epochs = 1
-    transition_finetune_epochs = 16
+    encoder_warmup_epochs = 8
+    transition_finetune_epochs = 32
 
     encoder_optimizer = torch.optim.AdamW(
         [
@@ -67,11 +86,11 @@ def train(
             ]
             for param in net.parameters()
         ],
-        lr=1e-3,
+        lr=1.0e-3,
     )
     encoder_lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(
         encoder_optimizer,
-        gamma=0.01 ** (1 / train_epochs),
+        gamma=0.05 ** (1 / train_epochs),
     )
 
     transition_optimizer = torch.optim.AdamW(
@@ -80,11 +99,12 @@ def train(
     )
     transition_lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(
         transition_optimizer,
-        gamma=(0.5) ** (1 / train_epochs),
+        gamma=(0.05) ** (1 / train_epochs),
     )
 
-    def get_state_action_batch(batch_size):
+    def get_state_action_batch(np_rng, batch_size, states=states, actions=actions):
         """Get a batch of states and actions."""
+
         np_encoder_batch_raveled_inds = np_rng.permutation(np.prod(states.shape[:-1]))[
             :batch_size
         ]
@@ -100,8 +120,9 @@ def train(
 
         return state_batch, action_batch
 
-    def get_traj_batch(np_rng, batch_size):
+    def get_traj_batch(np_rng, batch_size, states=states, actions=actions):
         """Get a batch of trajectories."""
+
         perm_num = states.shape[0]
         if batch_size > states.shape[0]:
             repeat_count = batch_size // states.shape[0] + 1
@@ -124,9 +145,10 @@ def train(
 
         return state_traj_batch, action_traj_batch, transition_start_inds
 
-    def perturb_actions(latent_traj_actions, mask):
+    def perturb_actions(latent_traj_actions):
 
         # Generate random perturbations
+        perturbations = perturbation_generator(len(latent_traj_actions))
         perturbations = torch.randn_like(latent_traj_actions)
         # Normalize the perturbations
         perturbations = perturbations / torch.norm(
@@ -144,13 +166,11 @@ def train(
         )
         # Scale the perturbed actions to the action space size
         perturbed_actions_scaled = (
-            latent_traj_actions_perturbed
-            / perturbed_action_norms
-            * coverage_loss_func.action_space_size
+            latent_traj_actions_perturbed / perturbed_action_norms * action_space_size
         )
         # Now use the scaled perturbed actions if the norms are too large
         latent_traj_actions_perturbed = torch.where(
-            perturbed_action_norms > coverage_loss_func.action_space_size,
+            perturbed_action_norms > action_space_size,
             perturbed_actions_scaled,
             latent_traj_actions_perturbed,
         )
@@ -165,17 +185,16 @@ def train(
         traj_states,
         traj_actions,
     ):
-        encoder_optimizer.zero_grad()
-        transition_optimizer.zero_grad()
+        if step % encoder_grad_skips == 0:
+            encoder_optimizer.zero_grad()
+            transition_optimizer.zero_grad()
 
         flat_encoded_states = state_encoder(flat_states)
-        flat_encoded_actions = action_encoder(
-            torch.cat([flat_actions, flat_states], dim=-1)
-        )
+        flat_encoded_actions = action_encoder((flat_actions, flat_states))
 
         flat_reconstructed_states = state_decoder(flat_encoded_states)
         flat_reconstructed_actions = action_decoder(
-            torch.cat([flat_encoded_actions, flat_encoded_states], dim=-1)
+            (flat_encoded_actions, flat_encoded_states)
         )
 
         state_reconstruction_loss = state_mse(flat_reconstructed_states, flat_states)
@@ -183,14 +202,16 @@ def train(
             flat_reconstructed_actions, flat_actions
         )
 
-        coverage_loss = coverage_loss_func(flat_encoded_states, flat_encoded_actions)
+        state_coverage_loss = state_coverage_loss_func(flat_encoded_states)
+        action_coverage_loss = action_coverage_loss_func(flat_encoded_actions)
+        ccondensation_loss = condensation_loss_func(
+            flat_encoded_states, flat_encoded_actions
+        )
 
         traj_start_states = traj_states[torch.arange(len(traj_states)), traj_start_inds]
         traj_latent_start_states = state_encoder(traj_start_states)
         traj_latent_states = state_encoder(traj_states)
-        traj_latent_actions = action_encoder(
-            torch.cat([traj_actions, traj_states], dim=-1)
-        )
+        traj_latent_actions = action_encoder((traj_actions, traj_states))
 
         traj_latent_fut_states_prime, mask = transition_model(
             traj_latent_start_states,
@@ -199,7 +220,18 @@ def train(
             return_mask=True,
         )
 
-        perturbed_latent_traj_actions = perturb_actions(traj_latent_actions, mask)
+        transition_loss = transition_loss_func(
+            traj_latent_fut_states_prime, traj_latent_states, mask
+        )
+
+        all_perturbed_latent_traj_actions = perturb_actions(traj_latent_actions)
+        perturb_inds = np_rng.integers(traj_start_inds.cpu(), traj_states.shape[-2])
+        perturbed_latent_traj_actions = traj_latent_actions.clone()
+        perturbed_latent_traj_actions[
+            torch.arange(len(perturbed_latent_traj_actions)), perturb_inds
+        ] = all_perturbed_latent_traj_actions[
+            torch.arange(len(all_perturbed_latent_traj_actions)), perturb_inds
+        ]
 
         traj_latent_fut_states_prime_perturbed = transition_model(
             traj_latent_start_states,
@@ -218,18 +250,26 @@ def train(
         encoder_loss = (
             state_reconstruction_loss
             + action_reconstruction_loss
+            + ccondensation_loss
             + smoothness_loss
-            + coverage_loss * 0.01
+            + transition_loss * 0.01
+            + state_coverage_loss * 0.01
+            + action_coverage_loss * 0.01
         )
 
         encoder_loss.backward()
-        encoder_optimizer.step()
+
+        if step % encoder_grad_skips == encoder_grad_skips - 1:
+            encoder_optimizer.step()
 
         wandb.log(
             {
                 "state_reconstruction_loss": state_reconstruction_loss.item(),
                 "action_reconstruction_loss": action_reconstruction_loss.item(),
-                "coverage_loss": coverage_loss.item(),
+                "state_coverage_loss": state_coverage_loss.item(),
+                "action_coverage_loss": action_coverage_loss.item(),
+                "condensation_loss": ccondensation_loss.item(),
+                "transition_loss": transition_loss.item(),
                 "smoothness_loss": smoothness_loss.item(),
                 "encoder_loss": encoder_loss.item(),
                 "encoder_lr": encoder_lr_scheduler.get_last_lr()[0],
@@ -244,9 +284,7 @@ def train(
         traj_start_states = traj_states[torch.arange(len(traj_states)), traj_start_inds]
         traj_latent_start_states = state_encoder(traj_start_states)
         traj_latent_states = state_encoder(traj_states)
-        traj_latent_actions = action_encoder(
-            torch.cat([traj_actions, traj_states], dim=-1)
-        )
+        traj_latent_actions = action_encoder((traj_actions, traj_states))
 
         traj_latent_fut_states_prime, mask = transition_model(
             traj_latent_start_states,
@@ -275,7 +313,7 @@ def train(
         _epoch_state_actions = int(encoder_batch_size * epoch_steps)
         _epoch_trajectories = int(transition_batch_size * epoch_steps)
 
-        flat_states, flat_actions = get_state_action_batch(_epoch_state_actions)
+        flat_states, flat_actions = get_state_action_batch(np_rng, _epoch_state_actions)
         batchified_states = rearrange(
             flat_states, "(b n) e -> b n e", n=encoder_batch_size
         )
@@ -337,6 +375,146 @@ def train(
 
         return step + epoch_steps
 
+    def test_epoch(step):
+        with torch.no_grad():
+            flat_states, flat_actions = get_state_action_batch(
+                np_rng,
+                test_epoch_steps * encoder_batch_size,
+                states=states_test,
+                actions=actions_test,
+            )
+            traj_states, traj_actions, start_inds = get_traj_batch(
+                np_rng,
+                test_epoch_steps * transition_batch_size,
+                states=states_test,
+                actions=actions_test,
+            )
+            batchified_states = rearrange(
+                flat_states, "(b n) e -> b n e", n=encoder_batch_size
+            )
+            batchified_actions = rearrange(
+                flat_actions, "(b n) e -> b n e", n=encoder_batch_size
+            )
+            batchified_traj_states = rearrange(
+                traj_states, "(b n) t e -> b n t e", n=transition_batch_size
+            )
+            batchified_traj_actions = rearrange(
+                traj_actions, "(b n) t e -> b n t e", n=transition_batch_size
+            )
+            batchified_start_inds = rearrange(
+                start_inds, "(b n) -> b n", n=transition_batch_size
+            )
+
+            state_reconstruction_losses = []
+            action_reconstruction_losses = []
+            state_coverage_losses = []
+            action_coverage_losses = []
+            condensation_losses = []
+            transition_losses = []
+            smoothness_losses = []
+
+            for i in tqdm(range(test_epoch_steps), desc=f"Testing"):
+                flat_batch_states = batchified_states[i]
+                flat_batch_actions = batchified_actions[i]
+
+                batch_traj_states = batchified_traj_states[i]
+                batch_traj_actions = batchified_traj_actions[i]
+
+                batch_traj_start_inds = batchified_start_inds[i]
+
+                flat_encoded_states = state_encoder(flat_batch_states)
+                flat_encoded_actions = action_encoder(
+                    (flat_batch_actions, flat_batch_states)
+                )
+
+                flat_reconstructed_states = state_decoder(flat_encoded_states)
+                flat_reconstructed_actions = action_decoder(
+                    (flat_encoded_actions, flat_encoded_states)
+                )
+
+                state_reconstruction_loss = state_mse(
+                    flat_reconstructed_states, flat_batch_states
+                )
+                action_reconstruction_loss = action_mse(
+                    flat_reconstructed_actions, flat_batch_actions
+                )
+
+                state_coverage_loss = state_coverage_loss_func(flat_encoded_states)
+                action_coverage_loss = action_coverage_loss_func(flat_encoded_actions)
+                ccondensation_loss = condensation_loss_func(
+                    flat_encoded_states, flat_encoded_actions
+                )
+
+                traj_start_states = batch_traj_states[
+                    torch.arange(len(batch_traj_states)), batch_traj_start_inds
+                ]
+                traj_latent_start_states = state_encoder(traj_start_states)
+                traj_latent_states = state_encoder(batch_traj_states)
+                traj_latent_actions = action_encoder(
+                    (batch_traj_actions, batch_traj_states)
+                )
+
+                traj_latent_fut_states_prime, mask = transition_model(
+                    traj_latent_start_states,
+                    traj_latent_actions,
+                    start_indices=batch_traj_start_inds.cuda(),
+                    return_mask=True,
+                )
+
+                transition_loss = transition_loss_func(
+                    traj_latent_fut_states_prime, traj_latent_states, mask
+                )
+
+                all_perturbed_latent_traj_actions = perturb_actions(traj_latent_actions)
+                perturb_inds = np_rng.integers(
+                    batch_traj_start_inds.cpu(), traj_states.shape[-2]
+                )
+                perturbed_latent_traj_actions = traj_latent_actions.clone()
+                perturbed_latent_traj_actions[
+                    torch.arange(len(perturbed_latent_traj_actions)), perturb_inds
+                ] = all_perturbed_latent_traj_actions[
+                    torch.arange(len(all_perturbed_latent_traj_actions)), perturb_inds
+                ]
+
+                traj_latent_fut_states_prime_perturbed = transition_model(
+                    traj_latent_start_states,
+                    perturbed_latent_traj_actions,
+                    start_indices=batch_traj_start_inds.cuda(),
+                )
+
+                smoothness_loss = smoothness_loss_func(
+                    traj_latent_actions,
+                    traj_latent_fut_states_prime,
+                    perturbed_latent_traj_actions,
+                    traj_latent_fut_states_prime_perturbed,
+                    mask,
+                )
+
+                state_reconstruction_losses.append(state_reconstruction_loss.item())
+                action_reconstruction_losses.append(action_reconstruction_loss.item())
+                state_coverage_losses.append(state_coverage_loss.item())
+                action_coverage_losses.append(action_coverage_loss.item())
+                condensation_losses.append(ccondensation_loss.item())
+                transition_losses.append(transition_loss.item())
+                smoothness_losses.append(smoothness_loss.item())
+
+            wandb.log(
+                {
+                    "test_state_reconstruction_loss": np.mean(
+                        state_reconstruction_losses
+                    ),
+                    "test_action_reconstruction_loss": np.mean(
+                        action_reconstruction_losses
+                    ),
+                    "test_state_coverage_loss": np.mean(state_coverage_losses),
+                    "test_action_coverage_loss": np.mean(action_coverage_losses),
+                    "test_condensation_loss": np.mean(condensation_losses),
+                    "test_transition_loss": np.mean(transition_losses),
+                    "test_smoothness_loss": np.mean(smoothness_losses),
+                },
+                step=step,
+            )
+
     step = 0
 
     # Start with the transition warmup
@@ -359,6 +537,8 @@ def train(
         else:
             step = encoder_epoch(step, epoch)
 
+        test_epoch(step)
+
         # Step the learning rate
         encoder_lr_scheduler.step()
         transition_lr_scheduler.step()
@@ -366,177 +546,9 @@ def train(
 
     # Now do the transition finetuning
     print("Transition finetuning")
-    for epoch in range(transition_finetune_epochs):
-        step = transition_epoch(step, epoch - transition_finetune_epochs)
+    for _ in range(transition_finetune_epochs):
+        step = transition_epoch(step, epoch)
         epoch += 1
-
-    # for i in tqdm(range(), disable=False):
-
-    #     # Yoink a batch of data
-    #     np_encoder_batch_raveled_inds = np_rng.permutation(np.prod(states.shape[0]))[
-    #         :encoder_batch_size
-    #     ]
-    #     encoder_batch_raveled_inds = torch.tensor(
-    #         np_encoder_batch_raveled_inds, device=states.device
-    #     )
-    #     encoder_batch_inds = torch.unravel_index(
-    #         encoder_batch_raveled_inds, states.shape[:-1]
-    #     )
-
-    #     np_transition_traj_batch_inds = np_rng.permutation(states.shape[0])[
-    #         :transition_batch_size
-    #     ]
-    #     transition_traj_batch_inds = torch.tensor(
-    #         np_transition_traj_batch_inds, device=states.device
-    #     )[:transition_batch_size]
-    #     transition_start_inds = torch.randint(
-    #         0,
-    #         int(states.shape[-2] // 1.1),
-    #         (transition_batch_size,),
-    #         device=states.device,
-    #     )
-
-    #     state_batch = states[encoder_batch_inds].to("cuda")
-    #     action_batch = actions[encoder_batch_inds].to("cuda")
-
-    #     starting_states = states[transition_traj_batch_inds, transition_start_inds].to(
-    #         "cuda"
-    #     )
-    #     state_traj_batch = states[transition_traj_batch_inds].to("cuda")
-    #     action_traj_batch = actions[transition_traj_batch_inds].to("cuda")
-
-    #     # Now do a forward pass
-
-    #     if i % encoder_step_every == 0 and i < steps:
-    #         perceptron_optimizer.zero_grad()
-    #         transformer_optimizer.zero_grad()
-
-    #         latent_states = state_encoder(state_batch)
-    #         latent_actions = action_encoder(
-    #             torch.cat([action_batch, state_batch], dim=-1)
-    #         )
-
-    #         reconstructed_states = state_decoder(latent_states)
-    #         reconstructed_actions = action_decoder(
-    #             torch.cat([latent_actions, latent_states], dim=-1)
-    #         )
-
-    #         state_reconstruction_loss = state_mse(reconstructed_states, state_batch)
-    #         action_reconstruction_loss = action_mse(reconstructed_actions, action_batch)
-
-    #         latent_start_states = state_encoder(starting_states)
-    #         latent_traj_actions = action_encoder(
-    #             torch.cat([action_traj_batch, state_traj_batch], dim=-1)
-    #         )
-    #         latent_fut_states_prime, mask = transition_model(
-    #             latent_start_states,
-    #             latent_traj_actions,
-    #             start_indices=transition_start_inds.cuda(),
-    #             return_mask=True,
-    #         )
-    #         latent_fut_states_gt = state_encoder(state_traj_batch)
-
-    #         perturbations = torch.randn_like(latent_traj_actions)
-    #         perturbations = perturbations / torch.norm(
-    #             perturbations, p=1, dim=-1, keepdim=True
-    #         )
-    #         perturbations = perturbations * torch.rand(
-    #             (*perturbations.shape[:-1], 1), device="cuda"
-    #         )
-
-    #         latent_traj_actions_perturbed = latent_traj_actions + perturbations
-    #         # Normalize the perturbations if they are too large
-    #         perturbed_action_norms = torch.norm(
-    #             latent_traj_actions_perturbed, p=1, dim=-1, keepdim=True
-    #         )
-    #         latent_traj_actions_perturbed = torch.where(
-    #             perturbed_action_norms > coverage_loss_func.action_space_size,
-    #             latent_traj_actions_perturbed
-    #             * coverage_loss_func.action_space_size
-    #             / perturbed_action_norms,
-    #             latent_traj_actions_perturbed,
-    #         )
-    #         latent_fut_states_prime_perturbed = transition_model(
-    #             latent_start_states,
-    #             latent_traj_actions_perturbed,
-    #             start_indices=transition_start_inds.cuda(),
-    #         )
-
-    #         transition_loss = transition_loss_func(
-    #             latent_fut_states_prime, latent_fut_states_gt, mask
-    #         )
-    #         smoothness_loss = smoothness_loss_func(
-    #             latent_traj_actions,
-    #             latent_fut_states_prime,
-    #             latent_traj_actions_perturbed,
-    #             latent_fut_states_prime_perturbed,
-    #             mask,
-    #         )
-    #         coverage_loss = coverage_loss_func(latent_states, latent_actions)
-
-    #         perceptron_loss = (
-    #             state_reconstruction_loss
-    #             + action_reconstruction_loss
-    #             + smoothness_loss
-    #             + coverage_loss * 0.01
-    #         )
-
-    #         perceptron_loss.backward()
-    #         perceptron_optimizer.step()
-    #         perceptron_lr_scheduler.step()
-
-    #     # Now do a forward pass for the transformer
-
-    #     if True:
-    #         transformer_optimizer.zero_grad()
-    #         perceptron_optimizer.zero_grad()
-
-    #         latent_start_states = state_encoder(starting_states)
-    #         latent_traj_actions = action_encoder(
-    #             torch.cat([action_traj_batch, state_traj_batch], dim=-1)
-    #         )
-    #         latent_fut_states_prime = transition_model(
-    #             latent_start_states,
-    #             latent_traj_actions,
-    #             start_indices=transition_start_inds.cuda(),
-    #         )
-    #         latent_fut_states_gt = state_encoder(state_traj_batch)
-
-    #         transition_loss = transition_loss_func(
-    #             latent_fut_states_prime, latent_fut_states_gt, mask
-    #         )
-
-    #         transition_loss.backward()
-    #         transformer_optimizer.step()
-
-    #         if i < steps:
-    #             transformer_lr_scheduler.step()
-
-    #     wandb.log(
-    #         {
-    #             "perceptron_loss": perceptron_loss.item(),
-    #             "transition_loss": transition_loss.item(),
-    #             "perceptron_lr": perceptron_lr_scheduler.get_last_lr()[0],
-    #             "transformer_lr": transformer_lr_scheduler.get_last_lr()[0],
-    #             "smoothness_loss": smoothness_loss.item(),
-    #             "coverage_loss": coverage_loss.item(),
-    #             "state_reconstruction_loss": state_reconstruction_loss.item(),
-    #             "action_reconstruction_loss": action_reconstruction_loss.item(),
-    #         }
-    #     )
-
-    #     # if i % 16 == 15:
-    #     #     print(
-    #     #         f"Iteration {i}:\n"
-    #     #         + f"    perceptron loss:            {perceptron_loss.item()}\n"
-    #     #         + f"    transformer loss:           {transition_loss.item()}\n"
-    #     #         + f"    perceptron lr:              {perceptron_lr_scheduler.get_last_lr()}\n"
-    #     #         + f"    transformer lr:             {transformer_lr_scheduler.get_last_lr()}\n"
-    #     #         + f"    smoothness loss:            {smoothness_loss.item()}\n"
-    #     #         + f"    coverage loss:              {coverage_loss.item()}\n"
-    #     #         + f"    state reconstruction loss:  {state_reconstruction_loss.item()}\n"
-    #     #         + f"    action reconstruction loss: {action_reconstruction_loss.item()}"
-    #     #     )
 
 
 if __name__ == "__main__":
@@ -585,10 +597,14 @@ if __name__ == "__main__":
         2, 4, 32, 4, n_layers=3, pe_wavelength_range=[1, 2048]
     ).cuda()
 
-    state_encoder = Perceptron(state_dim, [32, 64, 32], state_dim).cuda()
-    action_encoder = Perceptron(action_dim + state_dim, [32, 32, 32], action_dim).cuda()
-    state_decoder = Perceptron(state_dim, [32, 64, 32], state_dim).cuda()
-    action_decoder = Perceptron(action_dim + state_dim, [32, 32, 32], action_dim).cuda()
+    state_encoder = Perceptron(state_dim, [64, 256, 64], state_dim).cuda()
+    action_encoder = DoublePerceptron(
+        action_dim, state_dim, [64, 256, 64], action_dim
+    ).cuda()
+    state_decoder = Perceptron(state_dim, [64, 256, 64], state_dim).cuda()
+    action_decoder = DoublePerceptron(
+        action_dim, state_dim, [64, 256, 64], action_dim
+    ).cuda()
 
     with profiler.profile(
         enabled=False,
@@ -604,6 +620,8 @@ if __name__ == "__main__":
             action_decoder,
             observations_train,
             actions_train,
+            observations_test,
+            actions_test,
             np_rng,
         )
 

@@ -59,65 +59,45 @@ class SmoothnessLoss(nn.Module):
 
 
 class CoverageLoss(nn.Module):
+
     def __init__(
         self,
-        space_size,
-        latent_samples=2048,
-        space_ball_p=1,
-        selection_tail_size=4,
-        far_sample_count=64,
-        pushing_sample_size=4,
+        decoder,
+        latent_sampler,
+        k=16,
         loss_function=nn.HuberLoss(),
     ):
         super().__init__()
 
-        self.space_size = space_size
-        self.latent_samples = latent_samples
-        self.space_ball_p = space_ball_p
-        self.selection_tail_size = selection_tail_size
-        self.far_sample_count = far_sample_count
-        self.pushing_sample_size = pushing_sample_size
+        self.decoder = decoder
+        self.latent_sampler = latent_sampler
+        self.k = k
         self.loss_function = loss_function
 
-    def forward(self, latents):
+    def forward(self, gt_vals):
         # penalize for empty space within the state space
-        # Sample random points in the latent space
-        if self.space_ball_p != 1:
-            raise NotImplementedError("Only L1 norm is supported :(")
 
-        space_samples = (
-            torch.rand(
-                self.latent_samples,
-                latents.shape[-1],
-                device=latents.device,
-            )
-            * 2
-            - 1
-        ) * self.space_size
+        train_latent_space_samples = self.latent_sampler(len(gt_vals))
+        test_latent_space_samples = self.latent_sampler(len(gt_vals))
 
-        # Find the state_space that is the farthest from any of the latent_states
-        space_dists = torch.cdist(space_samples, latents, p=1)
-        space_dist_tail = (
-            space_dists.sort(dim=-1)
-            .values[..., : self.selection_tail_size]
-            .mean(dim=-1)
+        random_recovered_space_samples = self.decoder(train_latent_space_samples)
+        recovered_test_samples = self.decoder(test_latent_space_samples)
+
+        train_space_samples = torch.cat(
+            [train_space_samples, random_recovered_space_samples]
         )
-        farthest_idxs = space_dist_tail.argsort(descending=True)[
-            : self.far_sample_count
-        ]
-        farthest_space_samples = space_samples[farthest_idxs]
 
-        # Now make the states by the farthest latent states closer to the farthest samples
-        # Maybe in the future make just the few closest ones closer
-        empty_space_dists = torch.cdist(farthest_space_samples, latents, p=1)
-        close_empty_space_dists = empty_space_dists.sort(dim=-1).values[
-            :, : self.pushing_sample_size
-        ]
-        space_coverage_loss = self.loss_function(
-            close_empty_space_dists, torch.zeros_like(close_empty_space_dists)
+        # Classify the test samples with a knn classifier
+        space_dists = torch.cdist(train_space_samples, recovered_test_samples, p=1)
+        k_nearest_idxs = space_dists.argsort(dim=-1)[..., : self.k]
+        random_count = torch.sum(k_nearest_idxs < len(gt_vals), dim=-1)
+
+        coverage_loss = self.loss_function(
+            random_count, torch.zeros_like(random_count)
         ).mean()
 
-        return space_coverage_loss
+        return coverage_loss
+
 
 class CondensationLoss(nn.Module):
     def __init__(self, state_space_size, action_space_size, space_ball_p=1):

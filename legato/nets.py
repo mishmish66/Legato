@@ -22,6 +22,16 @@ class Perceptron(nn.Module):
         return x
 
 
+class DoublePerceptron(Perceptron):
+    def __init__(self, input_dim_a, input_dim_b, layer_sizes, output_dim):
+        super().__init__(input_dim_a + input_dim_b, layer_sizes, output_dim)
+
+    def forward(self, inputs):
+        a, b = inputs
+        x = torch.cat([a, b], dim=-1)
+        return super().forward(x)
+
+
 class TransitionModel(nn.Module):
     def __init__(
         self,
@@ -118,6 +128,7 @@ class ActorPolicy(nn.Module):
         state_encoder,
         transition_model,
         action_decoder,
+        decay=0.01,
         horizon=128,
         iters=64,
     ):
@@ -127,10 +138,11 @@ class ActorPolicy(nn.Module):
         self.state_encoder = state_encoder
         self.transition_model = transition_model
         self.action_decoder = action_decoder
+        self.decay = decay
         self.horizon = horizon
         self.iters = iters
 
-    def forward(self, state, target_state, prev_latent_action_plan=None):
+    def forward(self, state, target_state, prev_latent_action_plan=None, return_curve=False):
         def gen_latent_actions(leading_dim):
             new_actions = torch.randn(
                 state.shape[0], leading_dim, self.action_dim, device=state.device
@@ -154,9 +166,14 @@ class ActorPolicy(nn.Module):
         latent_state = self.state_encoder(state).detach()
         latent_target_state = self.state_encoder(target_state).detach()
 
-        optim = torch.optim.Adam([latent_action_plan], lr=0.025)
+        optim = torch.optim.Adam([latent_action_plan], lr=1.0)
+        lr_sched = torch.optim.lr_scheduler.ExponentialLR(
+            optim, self.decay ** (1 / self.iters)
+        )
 
         state_mse = nn.MSELoss()
+        
+        loss_curve = []
 
         for i in range(self.iters):
             optim.zero_grad()
@@ -164,18 +181,22 @@ class ActorPolicy(nn.Module):
             loss = state_mse(latent_fut_states, latent_target_state)
             loss.backward()
             optim.step()
+            lr_sched.step()
+            
+            loss_curve.append(loss.item())
 
-            if i % 16 == 0:
+            if i == self.iters - 1:
                 print(loss.item())
 
-        next_action = self.action_decoder(
-            torch.cat([latent_action_plan[..., 0, :], latent_state], dim=-1)
-        )
+        next_action = self.action_decoder(latent_action_plan[..., 0, :], latent_state)
 
         # Pop the first action and append a new one
-        new_end_action = gen_latent_actions(1)
+        new_end_action = latent_action_plan[..., -1:, :]  # gen_latent_actions(1)
         latent_action_plan = torch.cat(
             [latent_action_plan[..., 1:, :], new_end_action], dim=-2
         )
 
-        return next_action.detach(), latent_action_plan.detach()
+        if return_curve:
+            return next_action.detach(), latent_action_plan.detach(), loss_curve
+        else:
+            return next_action.detach(), latent_action_plan.detach()

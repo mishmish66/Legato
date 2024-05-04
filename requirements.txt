@@ -1,0 +1,8 @@
+einops
+gymnasium
+gymnasium-robotics
+mujoco
+numpy
+torch
+tqdm
+wandb

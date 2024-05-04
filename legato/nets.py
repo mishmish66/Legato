@@ -142,7 +142,9 @@ class ActorPolicy(nn.Module):
         self.horizon = horizon
         self.iters = iters
 
-    def forward(self, state, target_state, prev_latent_action_plan=None, return_curve=False):
+    def forward(
+        self, state, target_state, prev_latent_action_plan=None, return_curve=False
+    ):
         def gen_latent_actions(leading_dim):
             new_actions = torch.randn(
                 state.shape[0], leading_dim, self.action_dim, device=state.device
@@ -172,7 +174,7 @@ class ActorPolicy(nn.Module):
         )
 
         state_mse = nn.MSELoss()
-        
+
         loss_curve = []
 
         for i in range(self.iters):
@@ -182,13 +184,13 @@ class ActorPolicy(nn.Module):
             loss.backward()
             optim.step()
             lr_sched.step()
-            
+
             loss_curve.append(loss.item())
 
             if i == self.iters - 1:
                 print(loss.item())
 
-        next_action = self.action_decoder(latent_action_plan[..., 0, :], latent_state)
+        next_action = self.action_decoder((latent_action_plan[..., 0, :], latent_state))
 
         # Pop the first action and append a new one
         new_end_action = latent_action_plan[..., -1:, :]  # gen_latent_actions(1)

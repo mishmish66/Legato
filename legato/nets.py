@@ -128,6 +128,7 @@ class ActorPolicy(nn.Module):
         state_encoder,
         transition_model,
         action_decoder,
+        lr=0.01,
         decay=0.01,
         horizon=128,
         iters=64,
@@ -138,6 +139,7 @@ class ActorPolicy(nn.Module):
         self.state_encoder = state_encoder
         self.transition_model = transition_model
         self.action_decoder = action_decoder
+        self.lr = lr
         self.decay = decay
         self.horizon = horizon
         self.iters = iters
@@ -168,7 +170,7 @@ class ActorPolicy(nn.Module):
         latent_state = self.state_encoder(state).detach()
         latent_target_state = self.state_encoder(target_state).detach()
 
-        optim = torch.optim.Adam([latent_action_plan], lr=1.0)
+        optim = torch.optim.Adam([latent_action_plan], lr=self.lr)
         lr_sched = torch.optim.lr_scheduler.ExponentialLR(
             optim, self.decay ** (1 / self.iters)
         )

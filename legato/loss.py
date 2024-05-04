@@ -80,21 +80,19 @@ class CoverageLoss(nn.Module):
         train_latent_space_samples = self.latent_sampler(len(gt_vals))
         test_latent_space_samples = self.latent_sampler(len(gt_vals))
 
-        random_recovered_space_samples = self.decoder(train_latent_space_samples)
+        recovered_train_samples = self.decoder(train_latent_space_samples).detach()
         recovered_test_samples = self.decoder(test_latent_space_samples)
 
-        train_space_samples = torch.cat(
-            [train_space_samples, random_recovered_space_samples]
+        # Classify the test samples with a modified knn classifier
+        positive_score_mat = 1 / torch.cdist(recovered_test_samples, gt_vals, p=1)
+        negative_score_mat = 1 / torch.cdist(
+            recovered_test_samples, recovered_train_samples, p=1
         )
+        positive_scores = torch.topk(positive_score_mat, self.k, dim=-1).values.mean(-1)
+        negative_scores = torch.topk(negative_score_mat, self.k, dim=-1).values.mean(-1)
 
-        # Classify the test samples with a knn classifier
-        space_dists = torch.cdist(train_space_samples, recovered_test_samples, p=1)
-        k_nearest_idxs = space_dists.argsort(dim=-1)[..., : self.k]
-        random_count = torch.sum(k_nearest_idxs < len(gt_vals), dim=-1)
-
-        coverage_loss = self.loss_function(
-            random_count, torch.zeros_like(random_count)
-        ).mean()
+        losses = torch.relu(negative_scores - positive_scores)
+        coverage_loss = self.loss_function(losses, torch.zeros_like(losses)).mean()
 
         return coverage_loss
 

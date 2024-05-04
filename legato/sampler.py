@@ -2,9 +2,10 @@ import torch
 
 
 class PBallSampler:
-    def __init__(self, d, p=1, sample_factor=1.5, device="cpu"):
+    def __init__(self, d, p=1, scale=1.0, sample_factor=1.5, device="cpu"):
         self.d = d
         self.p = p
+        self.scale = scale
         self.sample_factor = sample_factor
         self.device = device
 
@@ -24,7 +25,7 @@ class PBallSampler:
         while True:
             nans = torch.isnan(result).any(dim=-1)
             if not nans.any():
-                return result
+                return result * self.scale
 
             new_samples = gen_samples()
             n_samples_to_add = min(nans.sum(), len(new_samples))

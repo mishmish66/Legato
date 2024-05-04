@@ -30,9 +30,9 @@ def train(
 ):
     """Train the networks."""
 
-    perturbation_generator = PBallSampler(2, 1, device="cuda")
-    latent_action_sampler = PBallSampler(2, 1, device="cuda")
-    latent_state_sampler = PBallSampler(4, 1, device="cuda")
+    perturbation_generator = PBallSampler(2, 1, 1.0, device="cuda")
+    latent_state_sampler = PBallSampler(4, 1, state_space_size, device="cuda")
+    latent_action_sampler = PBallSampler(2, 1, action_space_size, device="cuda")
     latent_action_state_sampler = lambda n: (
         latent_action_sampler(n),
         latent_state_sampler(n),
@@ -69,10 +69,10 @@ def train(
     encoder_epochs = 1
     transition_epochs = 1
 
-    train_epochs = 256
+    train_epochs = 128
 
     transition_warmup_epochs = 1
-    encoder_warmup_epochs = 8
+    encoder_warmup_epochs = 16
     transition_finetune_epochs = 32
 
     encoder_optimizer = torch.optim.AdamW(
@@ -254,7 +254,7 @@ def train(
             + smoothness_loss
             + transition_loss * 0.01
             + state_coverage_loss * 0.01
-            + action_coverage_loss * 0.01
+            + action_coverage_loss * 0.001
         )
 
         encoder_loss.backward()
@@ -599,11 +599,11 @@ if __name__ == "__main__":
 
     state_encoder = Perceptron(state_dim, [64, 256, 64], state_dim).cuda()
     action_encoder = DoublePerceptron(
-        action_dim, state_dim, [64, 256, 64], action_dim
+        action_dim, state_dim, [256, 512, 256], action_dim
     ).cuda()
     state_decoder = Perceptron(state_dim, [64, 256, 64], state_dim).cuda()
     action_decoder = DoublePerceptron(
-        action_dim, state_dim, [64, 256, 64], action_dim
+        action_dim, state_dim, [256, 512, 256], action_dim
     ).cuda()
 
     with profiler.profile(

@@ -9,7 +9,13 @@ from torch import nn
 from tqdm import tqdm
 
 import wandb
-from legato.loss import CoverageLoss, SmoothnessLoss, TransitionLoss, CondensationLoss
+from legato.loss import (
+    CoverageLoss,
+    SmoothnessLoss,
+    TransitionLoss,
+    CondensationLoss,
+    ConsistencyLoss,
+)
 from legato.nets import DoublePerceptron, Perceptron, TransitionModel
 from legato.sampler import PBallSampler
 
@@ -46,11 +52,35 @@ def train(
     smoothness_loss_func = SmoothnessLoss()
 
     state_coverage_loss_func = torch.compile(
-        CoverageLoss(state_decoder, latent_state_sampler, k=16)
+        CoverageLoss(
+            latent_state_sampler,
+            latent_samples=16_384,
+            selection_tail_size=4,
+            far_sample_count=256,
+            pushing_sample_size=64,
+        )  # , disable=True
     )
     action_coverage_loss_func = torch.compile(
-        CoverageLoss(action_decoder, latent_action_state_sampler, k=16)
+        CoverageLoss(
+            latent_action_sampler,
+            latent_samples=16_384,
+            selection_tail_size=4,
+            far_sample_count=256,
+            pushing_sample_size=64,
+        )  # , disable=True
     )
+
+    consistency_loss_func = torch.compile(
+        ConsistencyLoss(
+            latent_state_sampler=latent_state_sampler,
+            latent_action_sampler=latent_action_sampler,
+            state_decoder=state_decoder,
+            action_decoder=action_decoder,
+            state_encoder=state_encoder,
+            action_encoder=action_encoder,
+        )  # , disable=True
+    )
+
     condensation_loss_func = CondensationLoss(
         state_space_size=state_space_size,
         action_space_size=action_space_size,
@@ -72,7 +102,7 @@ def train(
     train_epochs = 128
 
     transition_warmup_epochs = 1
-    encoder_warmup_epochs = 16
+    encoder_warmup_epochs = 4
     transition_finetune_epochs = 32
 
     encoder_optimizer = torch.optim.AdamW(
@@ -247,6 +277,8 @@ def train(
             mask,
         )
 
+        consistency_loss = consistency_loss_func()
+
         encoder_loss = (
             state_reconstruction_loss
             + action_reconstruction_loss
@@ -254,7 +286,8 @@ def train(
             + smoothness_loss
             + transition_loss * 0.01
             + state_coverage_loss * 0.01
-            + action_coverage_loss * 0.001
+            + action_coverage_loss * 0.01
+            + consistency_loss * 0.1
         )
 
         encoder_loss.backward()
@@ -271,6 +304,7 @@ def train(
                 "condensation_loss": ccondensation_loss.item(),
                 "transition_loss": transition_loss.item(),
                 "smoothness_loss": smoothness_loss.item(),
+                "consistency_loss": consistency_loss.item(),
                 "encoder_loss": encoder_loss.item(),
                 "encoder_lr": encoder_lr_scheduler.get_last_lr()[0],
             },
@@ -597,11 +631,11 @@ if __name__ == "__main__":
         2, 4, 32, 4, n_layers=3, pe_wavelength_range=[1, 2048]
     ).cuda()
 
-    state_encoder = Perceptron(state_dim, [64, 256, 64], state_dim).cuda()
+    state_encoder = Perceptron(state_dim, [256, 512, 256], state_dim).cuda()
     action_encoder = DoublePerceptron(
         action_dim, state_dim, [256, 512, 256], action_dim
     ).cuda()
-    state_decoder = Perceptron(state_dim, [64, 256, 64], state_dim).cuda()
+    state_decoder = Perceptron(state_dim, [256, 512, 256], state_dim).cuda()
     action_decoder = DoublePerceptron(
         action_dim, state_dim, [256, 512, 256], action_dim
     ).cuda()

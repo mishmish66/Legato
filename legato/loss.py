@@ -62,39 +62,100 @@ class CoverageLoss(nn.Module):
 
     def __init__(
         self,
-        decoder,
         latent_sampler,
-        k=16,
+        norm_p=1,
+        latent_samples=2048,
+        selection_tail_size=4,
+        far_sample_count=64,
+        pushing_sample_size=4,
         loss_function=nn.HuberLoss(),
     ):
         super().__init__()
 
-        self.decoder = decoder
         self.latent_sampler = latent_sampler
-        self.k = k
+        self.norm_p = norm_p
+        self.latent_samples = latent_samples
+        self.selection_tail_size = selection_tail_size
+        self.far_sample_count = far_sample_count
+        self.pushing_sample_size = pushing_sample_size
         self.loss_function = loss_function
 
-    def forward(self, gt_vals):
+    def forward(self, latents):
         # penalize for empty space within the state space
+        # Sample random points in the latent space
+        space_samples = self.latent_sampler(self.latent_samples)
 
-        train_latent_space_samples = self.latent_sampler(len(gt_vals))
-        test_latent_space_samples = self.latent_sampler(len(gt_vals))
+        # Find the sample that is the farthest from any of the latent states
+        space_dists = torch.cdist(space_samples, latents, p=self.norm_p)
+        tail_dists = torch.topk(
+            space_dists, self.selection_tail_size, dim=-1, largest=False
+        ).values.mean(-1)
+        farthest_dist_inds = torch.topk(
+            tail_dists, self.far_sample_count, dim=-1
+        ).indices
+        far_samples = space_samples[farthest_dist_inds]
 
-        recovered_train_samples = self.decoder(train_latent_space_samples).detach()
-        recovered_test_samples = self.decoder(test_latent_space_samples)
+        # Now make the states by the latent states closer to the farthest samples
+        empty_space_dists = torch.cdist(far_samples, latents, p=self.norm_p)
+        close_empty_space_dists = torch.topk(
+            empty_space_dists, self.pushing_sample_size, dim=-1, largest=False
+        ).values.mean(-1)
+        space_coverage_loss = self.loss_function(
+            close_empty_space_dists, torch.zeros_like(close_empty_space_dists)
+        ).mean()
 
+        return space_coverage_loss
+
+
+class ConsistencyLoss(nn.Module):
+
+    def __init__(
+        self,
+        latent_state_sampler,
+        latent_action_sampler,
+        state_decoder,
+        action_decoder,
+        state_encoder,
+        action_encoder,
+        state_samples=2048,
+        action_samples=2048,
+        loss_function=nn.HuberLoss(),
+    ):
+        super().__init__()
+
+        self.latent_state_sampler = latent_state_sampler
+        self.latent_action_sampler = latent_action_sampler
+        self.state_decoder = state_decoder
+        self.action_decoder = action_decoder
+        self.state_encoder = state_encoder
+        self.action_encoder = action_encoder
+        self.state_samples = state_samples
+        self.action_samples = action_samples
+        self.loss_function = loss_function
+
+    def forward(self):
+        # penalize for empty space within the state space
         # Classify the test samples with a modified knn classifier
-        positive_score_mat = 1 / torch.cdist(recovered_test_samples, gt_vals, p=1)
-        negative_score_mat = 1 / torch.cdist(
-            recovered_test_samples, recovered_train_samples, p=1
+
+        latent_states = self.latent_state_sampler(self.state_samples)
+        latent_actions = self.latent_action_sampler(self.action_samples)
+        latent_action_states = self.latent_state_sampler(self.action_samples)
+
+        action_states = self.state_decoder(latent_action_states)
+        actions = self.action_decoder((latent_actions, latent_action_states))
+        recovered_latent_actions = self.action_encoder((actions, action_states))
+
+        states = self.state_decoder(latent_states)
+        recovered_latent_states = self.state_encoder(states)
+
+        action_consistency_losses = self.loss_function(
+            latent_actions, recovered_latent_actions
         )
-        positive_scores = torch.topk(positive_score_mat, self.k, dim=-1).values.mean(-1)
-        negative_scores = torch.topk(negative_score_mat, self.k, dim=-1).values.mean(-1)
+        state_consistency_losses = self.loss_function(
+            latent_states, recovered_latent_states
+        )
 
-        losses = torch.relu(negative_scores - positive_scores)
-        coverage_loss = self.loss_function(losses, torch.zeros_like(losses)).mean()
-
-        return coverage_loss
+        return action_consistency_losses.mean() + state_consistency_losses.mean()
 
 
 class CondensationLoss(nn.Module):

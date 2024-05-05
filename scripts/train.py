@@ -54,18 +54,18 @@ def train(
     state_coverage_loss_func = torch.compile(
         CoverageLoss(
             latent_state_sampler,
-            latent_samples=16_384,
+            latent_samples=1024,
             selection_tail_size=4,
-            far_sample_count=256,
+            far_sample_count=16,
             pushing_sample_size=64,
         )  # , disable=True
     )
     action_coverage_loss_func = torch.compile(
         CoverageLoss(
             latent_action_sampler,
-            latent_samples=16_384,
+            latent_samples=1024,
             selection_tail_size=4,
-            far_sample_count=256,
+            far_sample_count=16,
             pushing_sample_size=64,
         )  # , disable=True
     )
@@ -87,7 +87,7 @@ def train(
     )
 
     epoch_state_actions = int(5e5)
-    epoch_trajectories = int(5e3)
+    epoch_trajectories = int(1e4)
 
     encoder_batch_size = 1024
     transition_batch_size = 128
@@ -116,20 +116,20 @@ def train(
             ]
             for param in net.parameters()
         ],
-        lr=1.0e-3,
+        lr=5e-4,
     )
     encoder_lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(
         encoder_optimizer,
-        gamma=0.05 ** (1 / train_epochs),
+        gamma=1.0 ** (1 / train_epochs),
     )
 
     transition_optimizer = torch.optim.AdamW(
         transition_model.parameters(),
-        lr=1e-3,
+        lr=2.5e-4,
     )
     transition_lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(
         transition_optimizer,
-        gamma=(0.05) ** (1 / train_epochs),
+        gamma=1.0 ** (1 / train_epochs),
     )
 
     def get_state_action_batch(np_rng, batch_size, states=states, actions=actions):
@@ -283,10 +283,10 @@ def train(
             state_reconstruction_loss
             + action_reconstruction_loss
             + ccondensation_loss
-            + smoothness_loss
+            + smoothness_loss * 2.0
             + transition_loss * 0.01
-            + state_coverage_loss * 0.01
-            + action_coverage_loss * 0.01
+            + state_coverage_loss * 0.1
+            + action_coverage_loss * 0.1
             + consistency_loss * 0.1
         )
 

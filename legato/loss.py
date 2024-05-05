@@ -68,7 +68,7 @@ class CoverageLoss(nn.Module):
         selection_tail_size=4,
         far_sample_count=64,
         pushing_sample_size=4,
-        loss_function=nn.HuberLoss(),
+        loss_function=nn.L1Loss()# nn.HuberLoss(),
     ):
         super().__init__()
 

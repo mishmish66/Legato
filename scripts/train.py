@@ -54,7 +54,7 @@ def train(
     state_coverage_loss_func = torch.compile(
         CoverageLoss(
             latent_state_sampler,
-            latent_samples=1024,
+            latent_samples=4096,
             selection_tail_size=4,
             far_sample_count=16,
             pushing_sample_size=64,
@@ -87,14 +87,14 @@ def train(
     )
 
     epoch_state_actions = int(5e5)
-    epoch_trajectories = int(1e4)
+    epoch_trajectories = int(5e3)
 
     encoder_batch_size = 1024
     transition_batch_size = 128
 
     test_epoch_steps = 8
 
-    encoder_grad_skips = 16
+    encoder_grad_skips = 4
 
     encoder_epochs = 1
     transition_epochs = 1
@@ -116,7 +116,7 @@ def train(
             ]
             for param in net.parameters()
         ],
-        lr=5e-4,
+        lr=2.5e-4,
     )
     encoder_lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(
         encoder_optimizer,
@@ -125,7 +125,7 @@ def train(
 
     transition_optimizer = torch.optim.AdamW(
         transition_model.parameters(),
-        lr=2.5e-4,
+        lr=1e-4,
     )
     transition_lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(
         transition_optimizer,
@@ -282,11 +282,11 @@ def train(
         encoder_loss = (
             state_reconstruction_loss
             + action_reconstruction_loss
-            + ccondensation_loss
+            + ccondensation_loss * 10.0
             + smoothness_loss * 2.0
             + transition_loss * 0.01
-            + state_coverage_loss * 0.1
-            + action_coverage_loss * 0.1
+            + state_coverage_loss * 1.0
+            + action_coverage_loss * 1.0
             + consistency_loss * 0.1
         )
 

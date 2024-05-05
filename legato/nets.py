@@ -127,6 +127,7 @@ class ActorPolicy(nn.Module):
         action_space_size,
         state_encoder,
         transition_model,
+        state_decoder,
         action_decoder,
         lr=0.01,
         decay=0.01,
@@ -138,6 +139,7 @@ class ActorPolicy(nn.Module):
         self.action_space_size = action_space_size
         self.state_encoder = state_encoder
         self.transition_model = transition_model
+        self.state_decoder = state_decoder
         self.action_decoder = action_decoder
         self.lr = lr
         self.decay = decay
@@ -182,7 +184,9 @@ class ActorPolicy(nn.Module):
         for i in range(self.iters):
             optim.zero_grad()
             latent_fut_states = self.transition_model(latent_state, latent_action_plan)
-            loss = state_mse(latent_fut_states, latent_target_state)
+            fut_states = self.state_decoder(latent_fut_states)
+            fut_states[..., 2:] = 0.0
+            loss = state_mse(fut_states, target_state[..., None, :])
             loss.backward()
             optim.step()
             lr_sched.step()

@@ -83,17 +83,26 @@ class CoverageLoss(nn.Module):
     def forward(self, latents):
         # penalize for empty space within the state space
         # Sample random points in the latent space
-        space_samples = self.latent_sampler(self.latent_samples)
 
-        # Find the sample that is the farthest from any of the latent states
-        space_dists = torch.cdist(space_samples, latents, p=self.norm_p)
-        tail_dists = torch.topk(
-            space_dists, self.selection_tail_size, dim=-1, largest=False
-        ).values.mean(-1)
-        farthest_dist_inds = torch.topk(
-            tail_dists, self.far_sample_count, dim=-1
-        ).indices
-        far_samples = space_samples[farthest_dist_inds]
+        proposals = self.latent_sampler(self.latent_samples)
+        points = torch.cat([proposals, latents], dim=0)
+        distances = torch.cdist(proposals, points, p=self.norm_p)
+
+        in_point_mask = torch.zeros(
+            len(points), dtype=torch.bool, device=latents.device
+        )
+        in_point_mask[self.latent_samples :] = True
+        far_samples = torch.zeros(
+            0, latents.shape[-1], dtype=latents.dtype, device=latents.device
+        )
+        while len(far_samples) < self.far_sample_count:
+            in_point_dists = distances[:, in_point_mask]
+            tail_distances = torch.topk(
+                in_point_dists, self.selection_tail_size, dim=-1, largest=False
+            ).values.mean(-1)
+            farthest_index = torch.topk(tail_distances, 1, dim=-1).indices
+            in_point_mask[farthest_index] = True
+            far_samples = torch.cat([far_samples, proposals[farthest_index]], dim=0)
 
         # Now make the states by the latent states closer to the farthest samples
         empty_space_dists = torch.cdist(far_samples, latents, p=self.norm_p)

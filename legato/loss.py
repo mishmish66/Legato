@@ -68,7 +68,7 @@ class CoverageLoss(nn.Module):
         selection_tail_size=4,
         far_sample_count=64,
         pushing_sample_size=4,
-        loss_function=nn.L1Loss()# nn.HuberLoss(),
+        loss_function=nn.L1Loss(),  # nn.HuberLoss(),
     ):
         super().__init__()
 
@@ -92,17 +92,23 @@ class CoverageLoss(nn.Module):
             len(points), dtype=torch.bool, device=latents.device
         )
         in_point_mask[self.latent_samples :] = True
+        in_point_mask[self.latent_samples :] = True
         far_samples = torch.zeros(
-            0, latents.shape[-1], dtype=latents.dtype, device=latents.device
+            self.far_sample_count,
+            latents.shape[-1],
+            dtype=latents.dtype,
+            device=latents.device,
         )
-        while len(far_samples) < self.far_sample_count:
+        for i in range(self.far_sample_count):
             in_point_dists = distances[:, in_point_mask]
             tail_distances = torch.topk(
                 in_point_dists, self.selection_tail_size, dim=-1, largest=False
             ).values.mean(-1)
+            # Mask out already selected points
+            tail_distances[in_point_mask[: self.latent_samples]] = -torch.inf
             farthest_index = torch.topk(tail_distances, 1, dim=-1).indices
             in_point_mask[farthest_index] = True
-            far_samples = torch.cat([far_samples, proposals[farthest_index]], dim=0)
+            far_samples[i] = proposals[farthest_index]
 
         # Now make the states by the latent states closer to the farthest samples
         empty_space_dists = torch.cdist(far_samples, latents, p=self.norm_p)
@@ -168,11 +174,18 @@ class ConsistencyLoss(nn.Module):
 
 
 class CondensationLoss(nn.Module):
-    def __init__(self, state_space_size, action_space_size, space_ball_p=1):
+    def __init__(
+        self,
+        state_space_size,
+        action_space_size,
+        space_ball_p=1,
+        loss_function=nn.HuberLoss(),
+    ):
         super().__init__()
         self.state_space_size = state_space_size
         self.action_space_size = action_space_size
         self.space_ball_p = space_ball_p
+        self.loss_function = loss_function
 
     def forward(self, latent_states, latent_actions):
 
@@ -185,8 +198,12 @@ class CondensationLoss(nn.Module):
         state_violations = torch.relu(state_norms - self.state_space_size)
         action_violations = torch.relu(action_norms - self.action_space_size)
 
-        state_size_violations = state_violations**2
-        action_size_violations = action_violations**2
+        state_size_violations = self.loss_function(
+            state_violations, torch.zeros_like(state_violations)
+        )
+        action_size_violations = self.loss_function(
+            action_violations, torch.zeros_like(action_violations)
+        )
 
         state_size_loss = state_size_violations.mean()
         action_size_loss = action_size_violations.mean()

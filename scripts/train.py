@@ -56,8 +56,8 @@ def train(
             latent_state_sampler,
             latent_samples=4096,
             selection_tail_size=4,
-            far_sample_count=16,
-            pushing_sample_size=64,
+            far_sample_count=64,
+            pushing_sample_size=16,
         )  # , disable=True
     )
     action_coverage_loss_func = torch.compile(
@@ -84,17 +84,18 @@ def train(
     condensation_loss_func = CondensationLoss(
         state_space_size=state_space_size,
         action_space_size=action_space_size,
+        loss_function=nn.L1Loss(),
     )
 
     epoch_state_actions = int(5e5)
-    epoch_trajectories = int(5e3)
+    epoch_trajectories = int(2.5e4)
 
-    encoder_batch_size = 1024
+    encoder_batch_size = 4096
     transition_batch_size = 128
 
     test_epoch_steps = 8
 
-    encoder_grad_skips = 4
+    encoder_grad_skips = 1
 
     encoder_epochs = 1
     transition_epochs = 1
@@ -102,8 +103,8 @@ def train(
     train_epochs = 128
 
     transition_warmup_epochs = 1
-    encoder_warmup_epochs = 4
-    transition_finetune_epochs = 32
+    encoder_warmup_epochs = 2
+    transition_finetune_epochs = 8
 
     encoder_optimizer = torch.optim.AdamW(
         [
@@ -116,7 +117,7 @@ def train(
             ]
             for param in net.parameters()
         ],
-        lr=2.5e-4,
+        lr=5e-5,
     )
     encoder_lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(
         encoder_optimizer,
@@ -125,7 +126,7 @@ def train(
 
     transition_optimizer = torch.optim.AdamW(
         transition_model.parameters(),
-        lr=1e-4,
+        lr=5e-5,
     )
     transition_lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(
         transition_optimizer,
@@ -234,7 +235,7 @@ def train(
 
         state_coverage_loss = state_coverage_loss_func(flat_encoded_states)
         action_coverage_loss = action_coverage_loss_func(flat_encoded_actions)
-        ccondensation_loss = condensation_loss_func(
+        condensation_loss = condensation_loss_func(
             flat_encoded_states, flat_encoded_actions
         )
 
@@ -282,12 +283,12 @@ def train(
         encoder_loss = (
             state_reconstruction_loss
             + action_reconstruction_loss
-            + ccondensation_loss * 10.0
-            + smoothness_loss * 2.0
+            + condensation_loss * 10.0
+            + smoothness_loss * 0.01
             + transition_loss * 0.01
-            + state_coverage_loss * 1.0
-            + action_coverage_loss * 1.0
-            + consistency_loss * 0.1
+            + state_coverage_loss * 0.1
+            + action_coverage_loss * 0.1
+            + consistency_loss * 1.0
         )
 
         encoder_loss.backward()
@@ -301,7 +302,7 @@ def train(
                 "action_reconstruction_loss": action_reconstruction_loss.item(),
                 "state_coverage_loss": state_coverage_loss.item(),
                 "action_coverage_loss": action_coverage_loss.item(),
-                "condensation_loss": ccondensation_loss.item(),
+                "condensation_loss": condensation_loss.item(),
                 "transition_loss": transition_loss.item(),
                 "smoothness_loss": smoothness_loss.item(),
                 "consistency_loss": consistency_loss.item(),
@@ -475,7 +476,7 @@ def train(
 
                 state_coverage_loss = state_coverage_loss_func(flat_encoded_states)
                 action_coverage_loss = action_coverage_loss_func(flat_encoded_actions)
-                ccondensation_loss = condensation_loss_func(
+                condensation_loss = condensation_loss_func(
                     flat_encoded_states, flat_encoded_actions
                 )
 
@@ -528,7 +529,7 @@ def train(
                 action_reconstruction_losses.append(action_reconstruction_loss.item())
                 state_coverage_losses.append(state_coverage_loss.item())
                 action_coverage_losses.append(action_coverage_loss.item())
-                condensation_losses.append(ccondensation_loss.item())
+                condensation_losses.append(condensation_loss.item())
                 transition_losses.append(transition_loss.item())
                 smoothness_losses.append(smoothness_loss.item())
 
@@ -628,16 +629,16 @@ if __name__ == "__main__":
     action_dim = actions_train.shape[-1]
 
     transition_model = TransitionModel(
-        2, 4, 32, 4, n_layers=3, pe_wavelength_range=[1, 2048]
+        2, 4, 128, 4, n_layers=3, pe_wavelength_range=[1, 2048]
     ).cuda()
 
-    state_encoder = Perceptron(state_dim, [256, 512, 256], state_dim).cuda()
+    state_encoder = Perceptron(state_dim, [512, 1024, 512], state_dim).cuda()
     action_encoder = DoublePerceptron(
-        action_dim, state_dim, [256, 512, 256], action_dim
+        action_dim, state_dim, [512, 1024, 512], action_dim
     ).cuda()
-    state_decoder = Perceptron(state_dim, [256, 512, 256], state_dim).cuda()
+    state_decoder = Perceptron(state_dim, [512, 1024, 512], state_dim).cuda()
     action_decoder = DoublePerceptron(
-        action_dim, state_dim, [256, 512, 256], action_dim
+        action_dim, state_dim, [512, 1024, 512], action_dim
     ).cuda()
 
     with profiler.profile(
@@ -679,3 +680,11 @@ if __name__ == "__main__":
         train_indices=train_indices,
         test_indices=test_indices,
     )
+    
+    # Upload to wandb
+    wandb.save("trained_net_params/state_encoder.pt")
+    wandb.save("trained_net_params/action_encoder.pt")
+    wandb.save("trained_net_params/transition_model.pt")
+    wandb.save("trained_net_params/state_decoder.pt")
+    wandb.save("trained_net_params/action_decoder.pt")
+    wandb.save("trained_net_params/indices.npz")

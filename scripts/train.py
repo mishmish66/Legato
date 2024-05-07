@@ -100,7 +100,7 @@ def train(
     encoder_epochs = 1
     transition_epochs = 1
 
-    train_epochs = 128
+    train_epochs = 256
 
     transition_warmup_epochs = 1
     encoder_warmup_epochs = 2

@@ -1,7 +1,7 @@
 import argparse
 import io
+import os
 
-import gymnasium as gym
 import numpy as np
 import requests
 import torch
@@ -594,7 +594,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--wandb_api_key", type=str, default=None)
     parser.add_argument("--data", type=str, default="data.npz")
-    # Add an argument for dataset url
     parser.add_argument("--url", type=str, default=None)
 
     args = parser.parse_args()
@@ -605,16 +604,23 @@ if __name__ == "__main__":
     np_rng = np.random.default_rng(0)
     torch.manual_seed(0)
 
+    # Initialize wandb
+
     if args.wandb_api_key is not None:
         wandb.login(key=args.wandb_api_key)
-        
+
     wandb.init(project="legato")
+    
+    # Load data stuff
 
     if args.url is not None:
         # Download the data from the url
-
+        print(f"Downloading data from {args.url}...")
         response = requests.get(args.url)
+        # Load data from the response
+        print("Loading data...")
         data = np.load(io.BytesIO(response.content))
+        print("Data loaded.")
         del response
 
     else:

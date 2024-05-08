@@ -1,0 +1,15 @@
+data.npz
+*.pyc
+trained_net_params/*
+.vscode*
+wandb*
+*.fls
+*.fdb_latexmk
+*.aux
+*.log
+*.out
+*.synctex.gz
+legato.egg-info*
+writeup.pdf
+experiments*
+.git*

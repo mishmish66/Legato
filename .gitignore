@@ -12,3 +12,5 @@ wandb/*
 *.synctex.gz
 legato.egg-info/*
 writeup.pdf
+outputs
+outputs/*

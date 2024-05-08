@@ -7,3 +7,4 @@ torch
 tqdm
 wandb
 vastai
+hydra-core

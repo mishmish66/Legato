@@ -1,12 +1,15 @@
 import argparse
 import io
 import os
+from pathlib import Path
 
+import hydra
 import numpy as np
 import requests
 import torch
 import torch.autograd.profiler as profiler
 from einops import einsum, pack, rearrange, repeat
+from omegaconf import OmegaConf
 from torch import nn
 from tqdm import tqdm
 
@@ -33,14 +36,16 @@ def train(
     states_test,
     actions_test,
     np_rng,
-    state_space_size=2.0,
-    action_space_size=1.0,
+    config,
+    slow_bar=False,
 ):
     """Train the networks."""
+    
+    mininterval = 30 if slow_bar else 0.1
 
     perturbation_generator = PBallSampler(2, 1, 1.0, device="cuda")
-    latent_state_sampler = PBallSampler(4, 1, state_space_size, device="cuda")
-    latent_action_sampler = PBallSampler(2, 1, action_space_size, device="cuda")
+    latent_state_sampler = PBallSampler(4, 1, config.state_space_size, device="cuda")
+    latent_action_sampler = PBallSampler(2, 1, config.action_space_size, device="cuda")
     latent_action_state_sampler = lambda n: (
         latent_action_sampler(n),
         latent_state_sampler(n),
@@ -53,22 +58,24 @@ def train(
 
     smoothness_loss_func = SmoothnessLoss()
 
+    state_coverage_loss_params = config.loss_params.state_coverage_loss_params
     state_coverage_loss_func = torch.compile(
         CoverageLoss(
             latent_state_sampler,
-            latent_samples=4096,
-            selection_tail_size=4,
-            far_sample_count=64,
-            pushing_sample_size=16,
+            latent_samples=state_coverage_loss_params.latent_samples,
+            selection_tail_size=state_coverage_loss_params.selection_tail_size,
+            far_sample_count=state_coverage_loss_params.far_sample_count,
+            pushing_sample_size=state_coverage_loss_params.pushing_sample_size,
         )  # , disable=True
     )
+    action_coverage_loss_params = config.loss_params.action_coverage_loss_params
     action_coverage_loss_func = torch.compile(
         CoverageLoss(
             latent_action_sampler,
-            latent_samples=1024,
-            selection_tail_size=4,
-            far_sample_count=16,
-            pushing_sample_size=64,
+            latent_samples=action_coverage_loss_params.latent_samples,
+            selection_tail_size=action_coverage_loss_params.selection_tail_size,
+            far_sample_count=action_coverage_loss_params.far_sample_count,
+            pushing_sample_size=action_coverage_loss_params.pushing_sample_size,
         )  # , disable=True
     )
 
@@ -84,29 +91,29 @@ def train(
     )
 
     condensation_loss_func = CondensationLoss(
-        state_space_size=state_space_size,
-        action_space_size=action_space_size,
+        state_space_size=config.state_space_size,
+        action_space_size=config.action_space_size,
         loss_function=nn.L1Loss(),
     )
 
-    epoch_state_actions = int(5e5)
-    epoch_trajectories = int(2.5e4)
+    epoch_state_actions = config.batching_params.epoch_state_actions
+    epoch_trajectories = config.batching_params.epoch_trajectories
 
-    encoder_batch_size = 4096
-    transition_batch_size = 128
+    encoder_batch_size = config.batching_params.encoder_batch_size
+    transition_batch_size = config.batching_params.transition_batch_size
 
-    test_epoch_steps = 8
+    test_epoch_steps = config.batching_params.test_epoch_steps
 
-    encoder_grad_skips = 1
+    encoder_grad_skips = config.batching_params.encoder_grad_skips
 
-    encoder_epochs = 1
-    transition_epochs = 1
+    encoder_epochs = config.batching_params.encoder_epochs
+    transition_epochs = config.batching_params.transition_epochs
 
-    train_epochs = 256
+    train_epochs = config.batching_params.train_epochs
 
-    transition_warmup_epochs = 1
-    encoder_warmup_epochs = 2
-    transition_finetune_epochs = 8
+    transition_warmup_epochs = config.batching_params.transition_warmup_epochs
+    encoder_warmup_epochs = config.batching_params.encoder_warmup_epochs
+    transition_finetune_epochs = config.batching_params.transition_finetune_epochs
 
     encoder_optimizer = torch.optim.AdamW(
         [
@@ -119,7 +126,7 @@ def train(
             ]
             for param in net.parameters()
         ],
-        lr=5e-5,
+        lr=config.optimizer_params.encoder_lr,
     )
     encoder_lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(
         encoder_optimizer,
@@ -128,7 +135,7 @@ def train(
 
     transition_optimizer = torch.optim.AdamW(
         transition_model.parameters(),
-        lr=5e-5,
+        lr=config.optimizer_params.transition_lr,
     )
     transition_lr_scheduler = torch.optim.lr_scheduler.ExponentialLR(
         transition_optimizer,
@@ -199,11 +206,13 @@ def train(
         )
         # Scale the perturbed actions to the action space size
         perturbed_actions_scaled = (
-            latent_traj_actions_perturbed / perturbed_action_norms * action_space_size
+            latent_traj_actions_perturbed
+            / perturbed_action_norms
+            * config.action_space_size
         )
         # Now use the scaled perturbed actions if the norms are too large
         latent_traj_actions_perturbed = torch.where(
-            perturbed_action_norms > action_space_size,
+            perturbed_action_norms > config.action_space_size,
             perturbed_actions_scaled,
             latent_traj_actions_perturbed,
         )
@@ -282,15 +291,16 @@ def train(
 
         consistency_loss = consistency_loss_func()
 
+        loss_weights = config.loss_params.loss_weights
         encoder_loss = (
-            state_reconstruction_loss
-            + action_reconstruction_loss
-            + condensation_loss * 10.0
-            + smoothness_loss * 0.01
-            + transition_loss * 0.01
-            + state_coverage_loss * 0.1
-            + action_coverage_loss * 0.1
-            + consistency_loss * 1.0
+            state_reconstruction_loss * loss_weights.state_reconstruction
+            + action_reconstruction_loss * loss_weights.action_reconstruction
+            + condensation_loss * loss_weights.condensation
+            + smoothness_loss * loss_weights.smoothness
+            + transition_loss * loss_weights.transition
+            + state_coverage_loss * loss_weights.state_coverage
+            + action_coverage_loss * loss_weights.action_coverage
+            + consistency_loss * loss_weights.consistency
         )
 
         encoder_loss.backward()
@@ -372,7 +382,9 @@ def train(
             start_inds, "(b n) -> b n", n=transition_batch_size
         )
 
-        for i in tqdm(range(epoch_steps), desc=f"Epoch {epoch}, Encoder", mininterval=10.0):
+        for i in tqdm(
+            range(epoch_steps), desc=f"Epoch {epoch}, Encoder", mininterval=mininterval
+        ):
             encoder_step(
                 step + i,
                 batchified_states[i],
@@ -402,7 +414,9 @@ def train(
             start_inds, "(b n) -> b n", n=transition_batch_size
         )
 
-        for i in tqdm(range(epoch_steps), desc=f"Epoch {epoch}, Transition", mininterval=10.0):
+        for i in tqdm(
+            range(epoch_steps), desc=f"Epoch {epoch}, Transition", mininterval=mininterval
+        ):
             transition_step(
                 step + i,
                 batchified_traj_states[i],
@@ -450,7 +464,7 @@ def train(
             transition_losses = []
             smoothness_losses = []
 
-            for i in tqdm(range(test_epoch_steps), desc=f"Testing", mininterval=10.0):
+            for i in tqdm(range(test_epoch_steps), desc=f"Testing", mininterval=mininterval):
                 flat_batch_states = batchified_states[i]
                 flat_batch_actions = batchified_actions[i]
 
@@ -588,15 +602,16 @@ def train(
         epoch += 1
 
 
-if __name__ == "__main__":
+@hydra.main(config_path="../config", config_name="config")
+def main(cfg):
 
     # Add an argument for dataset location (default: data.npz)
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--wandb_api_key", type=str, default=None)
-    parser.add_argument("--data", type=str, default="data.npz")
-    parser.add_argument("--url", type=str, default=None)
+    # parser = argparse.ArgumentParser()
+    # parser.add_argument("--wandb_api_key", type=str, default=None)
+    # parser.add_argument("--data", type=str, default="data.npz")
+    # parser.add_argument("--url", type=str, default=None)
 
-    args = parser.parse_args()
+    # args = parser.parse_args()
 
     # Not sure why but torch told me to do this
     torch.set_float32_matmul_precision("high")
@@ -606,17 +621,18 @@ if __name__ == "__main__":
 
     # Initialize wandb
 
-    if args.wandb_api_key is not None:
-        wandb.login(key=args.wandb_api_key)
+    if cfg.system_params.wandb_api_key is not None:
+        wandb.login(key=cfg.system_params.wandb_api_key)
 
-    wandb.init(project="legato")
+    config_dict = OmegaConf.to_container(cfg)
+    wandb.init(project="legato", config=config_dict)
 
     # Load data stuff
 
-    if args.url is not None:
+    if cfg.system_params.data_url is not None:
         # Download the data from the url
-        print(f"Downloading data from {args.url}...")
-        response = requests.get(args.url)
+        print(f"Downloading data from {cfg.system_params.data_url.url}...")
+        response = requests.get(cfg.system_params.data_url.url)
         # Load data from the response
         print("Loading data...")
         data = np.load(io.BytesIO(response.content))
@@ -625,7 +641,9 @@ if __name__ == "__main__":
 
     else:
         # Load data from data.npz
-        data = np.load(args.data)
+        data_file_path = Path(cfg.system_params.data_file_path)
+        data_file_path = hydra.utils.to_absolute_path(data_file_path)
+        data = np.load(data_file_path)
 
     observations = torch.tensor(
         data["observations"],
@@ -660,7 +678,9 @@ if __name__ == "__main__":
         2, 4, 128, 4, n_layers=3, pe_wavelength_range=[1, 2048]
     ).cuda()
 
-    state_encoder = Perceptron(state_dim, [512, 1024, 512], state_dim).cuda()
+    state_encoder = Perceptron(
+        state_dim, cfg.net_params.state_encoder_params.layer_sizes, state_dim
+    ).cuda()
     action_encoder = DoublePerceptron(
         action_dim, state_dim, [512, 1024, 512], action_dim
     ).cuda()
@@ -668,6 +688,9 @@ if __name__ == "__main__":
     action_decoder = DoublePerceptron(
         action_dim, state_dim, [512, 1024, 512], action_dim
     ).cuda()
+
+    # Check if we are in a Vast.ai instance
+    in_vast = os.getenv("CONTAINER_API_KEY") is not None
 
     with profiler.profile(
         enabled=False,
@@ -686,6 +709,8 @@ if __name__ == "__main__":
             observations_test,
             actions_test,
             np_rng,
+            cfg,
+            in_vast,
         )
 
     # prof.export_chrome_trace("profile_results.json")
@@ -719,7 +744,7 @@ if __name__ == "__main__":
 
     # Check if this is a Vast.ai instance
     # Check if CONTAINER_API_KEY is set
-    if os.getenv("CONTAINER_API_KEY"):
+    if in_vast:
         # Call "vastai stop instance $CONTAINER_ID" to stop the instance
         print("Stopping instance...")
         os.system(
@@ -727,3 +752,78 @@ if __name__ == "__main__":
             + f"--api-key {os.getenv('CONTAINER_API_KEY')}"
         )
         print("Instance stopped?")
+
+
+if __name__ == "__main__":
+    main()
+
+# params = {
+#     "net_params": {
+#         "transition_model_params": {
+#             "n_layers": 3,
+#             "n_heads": 4,
+#             "pe_wavelength_range": [1, 2048],
+#         },
+#         "state_encoder_params": {
+#             "layer_sizes": [512, 1024, 512],
+#         },
+#         "action_encoder_params": {
+#             "layer_sizes": [512, 1024, 512],
+#         },
+#         "state_decoder_params": {
+#             "layer_sizes": [512, 1024, 512],
+#         },
+#         "action_decoder_params": {
+#             "layer_sizes": [512, 1024, 512],
+#         },
+#     },
+#     "action_space_size": 1.0,
+#     "state_space_size": 2.0,
+#     "loss_params": {
+#         "loss_weights": {
+#             "state_reconstruction": 1.0,
+#             "action_reconstruction": 1.0,
+#             "state_coverage": 0.1,
+#             "action_coverage": 0.1,
+#             "condensation": 10.0,
+#             "transition": 0.01,
+#             "smoothness": 0.1,
+#             "consistency": 1.0,
+#         },
+#         "state_coverage_loss_params": {
+#             "latent_samples": 4096,
+#             "selection_tail_size": 4,
+#             "far_sample_count": 64,
+#             "pushing_sample_size": 16,
+#         },
+#         "action_coverage_loss_params": {
+#             "latent_samples": 1024,
+#             "selection_tail_size": 4,
+#             "far_sample_count": 16,
+#             "pushing_sample_size": 64,
+#         },
+#         "consistency_loss_params": {
+#             "state_samples": 2048,
+#             "action_samples": 2048,
+#         },
+#     },
+#     "batching_params": {
+#         "transition_warmup_epochs": 1,
+#         "encoder_warmup_epochs": 2,
+#         "transition_finetune_epochs": 8,
+#         "encoder_batch_size": 4096,
+#         "transition_batch_size": 128,
+#         "encoder_grad_skips": 1,
+#         "encoder_epochs": 1,
+#         "transition_epochs": 1,
+#         "train_epochs": 256,
+#         "test_epoch_steps": 8,
+#         "epoch_state_actions": int(5e5),
+#         "epoch_trajectories": int(2.5e4),
+#         "train_proportion": 0.8,
+#     },
+#     "optimizer_params": {
+#         "encoder_lr": 5e-5,
+#         "transition_lr": 5e-5,
+#     },
+# }

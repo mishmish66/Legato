@@ -372,7 +372,7 @@ def train(
             start_inds, "(b n) -> b n", n=transition_batch_size
         )
 
-        for i in tqdm(range(epoch_steps), desc=f"Epoch {epoch}, Encoder"):
+        for i in tqdm(range(epoch_steps), desc=f"Epoch {epoch}, Encoder", mininterval=10.0):
             encoder_step(
                 step + i,
                 batchified_states[i],
@@ -402,7 +402,7 @@ def train(
             start_inds, "(b n) -> b n", n=transition_batch_size
         )
 
-        for i in tqdm(range(epoch_steps), desc=f"Epoch {epoch}, Transition"):
+        for i in tqdm(range(epoch_steps), desc=f"Epoch {epoch}, Transition", mininterval=10.0):
             transition_step(
                 step + i,
                 batchified_traj_states[i],
@@ -450,7 +450,7 @@ def train(
             transition_losses = []
             smoothness_losses = []
 
-            for i in tqdm(range(test_epoch_steps), desc=f"Testing"):
+            for i in tqdm(range(test_epoch_steps), desc=f"Testing", mininterval=10.0):
                 flat_batch_states = batchified_states[i]
                 flat_batch_actions = batchified_actions[i]
 
@@ -610,7 +610,7 @@ if __name__ == "__main__":
         wandb.login(key=args.wandb_api_key)
 
     wandb.init(project="legato")
-    
+
     # Load data stuff
 
     if args.url is not None:
@@ -716,3 +716,14 @@ if __name__ == "__main__":
     wandb.save("trained_net_params/state_decoder.pt")
     wandb.save("trained_net_params/action_decoder.pt")
     wandb.save("trained_net_params/indices.npz")
+
+    # Check if this is a Vast.ai instance
+    # Check if CONTAINER_API_KEY is set
+    if os.getenv("CONTAINER_API_KEY"):
+        # Call "vastai stop instance $CONTAINER_ID" to stop the instance
+        print("Stopping instance...")
+        os.system(
+            f"vastai stop instance {os.getenv('CONTAINER_ID')}"
+            + f"--api-key {os.getenv('CONTAINER_API_KEY')}"
+        )
+        print("Instance stopped?")

@@ -1,7 +1,9 @@
 import argparse
+import io
 
 import gymnasium as gym
 import numpy as np
+import requests
 import torch
 import torch.autograd.profiler as profiler
 from einops import einsum, pack, rearrange, repeat
@@ -10,11 +12,11 @@ from tqdm import tqdm
 
 import wandb
 from legato.loss import (
+    CondensationLoss,
+    ConsistencyLoss,
     CoverageLoss,
     SmoothnessLoss,
     TransitionLoss,
-    CondensationLoss,
-    ConsistencyLoss,
 )
 from legato.nets import DoublePerceptron, Perceptron, TransitionModel
 from legato.sampler import PBallSampler
@@ -588,16 +590,36 @@ def train(
 
 if __name__ == "__main__":
 
+    # Add an argument for dataset location (default: data.npz)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--wandb_api_key", type=str, default=None)
+    parser.add_argument("--data", type=str, default="data.npz")
+    # Add an argument for dataset url
+    parser.add_argument("--url", type=str, default=None)
+
+    args = parser.parse_args()
+
     # Not sure why but torch told me to do this
     torch.set_float32_matmul_precision("high")
     # Set random seed
     np_rng = np.random.default_rng(0)
     torch.manual_seed(0)
 
+    if args.wandb_api_key is not None:
+        wandb.login(key=args.wandb_api_key)
+        
     wandb.init(project="legato")
 
-    # Load data from data.npz
-    data = np.load("data.npz")
+    if args.url is not None:
+        # Download the data from the url
+
+        response = requests.get(args.url)
+        data = np.load(io.BytesIO(response.content))
+        del response
+
+    else:
+        # Load data from data.npz
+        data = np.load(args.data)
 
     observations = torch.tensor(
         data["observations"],
@@ -680,7 +702,7 @@ if __name__ == "__main__":
         train_indices=train_indices,
         test_indices=test_indices,
     )
-    
+
     # Upload to wandb
     wandb.save("trained_net_params/state_encoder.pt")
     wandb.save("trained_net_params/action_encoder.pt")

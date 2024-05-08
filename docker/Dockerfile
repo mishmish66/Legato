@@ -15,4 +15,4 @@ RUN pip install --no-cache-dir -r ./requirements.txt
 RUN pip install --no-cache-dir -e .
 
 # Run the train.py script with wandb API key as a command-line argument
-CMD ["sh", "-c", "wandb login $1 && python scripts/train.py"]
+ENTRYPOINT ["python", "scripts/train.py", "--wandb_api_key", "--url"]

@@ -5,6 +5,7 @@ system_params:
 
 net_params:
   transition_model_params:
+    latent_dim: 128
     n_layers: 3
     n_heads: 4
     pe_wavelength_range: [1, 2048]
@@ -50,15 +51,15 @@ batching_params:
   transition_finetune_epochs: 8
   encoder_batch_size: 4096
   transition_batch_size: 128
-  encoder_grad_skips: 1
+  encoder_grad_skips: 4
   encoder_epochs: 1
   transition_epochs: 1
   train_epochs: 256
   test_epoch_steps: 8
-  epoch_state_actions: 500000
+  epoch_state_actions: 250000
   epoch_trajectories: 25000
   train_proportion: 0.8
 
 optimizer_params:
-  encoder_lr: 0.00005
-  transition_lr: 0.00005
+  encoder_lr: 0.0001
+  transition_lr: 0.0001

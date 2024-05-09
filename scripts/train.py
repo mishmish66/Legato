@@ -40,7 +40,7 @@ def train(
     slow_bar=False,
 ):
     """Train the networks."""
-    
+
     mininterval = 30 if slow_bar else 0.1
 
     perturbation_generator = PBallSampler(2, 1, 1.0, device="cuda")
@@ -415,7 +415,9 @@ def train(
         )
 
         for i in tqdm(
-            range(epoch_steps), desc=f"Epoch {epoch}, Transition", mininterval=mininterval
+            range(epoch_steps),
+            desc=f"Epoch {epoch}, Transition",
+            mininterval=mininterval,
         ):
             transition_step(
                 step + i,
@@ -464,7 +466,9 @@ def train(
             transition_losses = []
             smoothness_losses = []
 
-            for i in tqdm(range(test_epoch_steps), desc=f"Testing", mininterval=mininterval):
+            for i in tqdm(
+                range(test_epoch_steps), desc=f"Testing", mininterval=mininterval
+            ):
                 flat_batch_states = batchified_states[i]
                 flat_batch_actions = batchified_actions[i]
 
@@ -631,8 +635,8 @@ def main(cfg):
 
     if cfg.system_params.data_url is not None:
         # Download the data from the url
-        print(f"Downloading data from {cfg.system_params.data_url.url}...")
-        response = requests.get(cfg.system_params.data_url.url)
+        print(f"Downloading data from {cfg.system_params.data_url}...")
+        response = requests.get(cfg.system_params.data_url)
         # Load data from the response
         print("Loading data...")
         data = np.load(io.BytesIO(response.content))
@@ -675,18 +679,31 @@ def main(cfg):
     action_dim = actions_train.shape[-1]
 
     transition_model = TransitionModel(
-        2, 4, 128, 4, n_layers=3, pe_wavelength_range=[1, 2048]
+        2,
+        4,
+        cfg.net_params.transition_model_params.latent_dim,
+        cfg.net_params.transition_model_params.n_heads,
+        n_layers=cfg.net_params.transition_model_params.n_layers,
+        pe_wavelength_range=cfg.net_params.transition_model_params.pe_wavelength_range,
     ).cuda()
 
     state_encoder = Perceptron(
         state_dim, cfg.net_params.state_encoder_params.layer_sizes, state_dim
     ).cuda()
     action_encoder = DoublePerceptron(
-        action_dim, state_dim, [512, 1024, 512], action_dim
+        action_dim,
+        state_dim,
+        cfg.net_params.action_encoder_params.layer_sizes,
+        action_dim,
     ).cuda()
-    state_decoder = Perceptron(state_dim, [512, 1024, 512], state_dim).cuda()
+    state_decoder = Perceptron(
+        state_dim, cfg.net_params.state_decoder_params.layer_sizes, state_dim
+    ).cuda()
     action_decoder = DoublePerceptron(
-        action_dim, state_dim, [512, 1024, 512], action_dim
+        action_dim,
+        state_dim,
+        cfg.net_params.action_decoder_params.layer_sizes,
+        action_dim,
     ).cuda()
 
     # Check if we are in a Vast.ai instance
@@ -720,27 +737,29 @@ def main(cfg):
     #     )
     # )
 
+    trained_param_dir = Path(__file__).parent.parent / "trained_net_params"
+
     # Save the models
-    torch.save(state_encoder, "trained_net_params/state_encoder.pt")
-    torch.save(action_encoder, "trained_net_params/action_encoder.pt")
-    torch.save(transition_model, "trained_net_params/transition_model.pt")
-    torch.save(state_decoder, "trained_net_params/state_decoder.pt")
-    torch.save(action_decoder, "trained_net_params/action_decoder.pt")
+    torch.save(state_encoder, trained_param_dir / "state_encoder.pt")
+    torch.save(action_encoder, trained_param_dir / "action_encoder.pt")
+    torch.save(transition_model, trained_param_dir / "transition_model.pt")
+    torch.save(state_decoder, trained_param_dir / "state_decoder.pt")
+    torch.save(action_decoder, trained_param_dir / "action_decoder.pt")
 
     # Save the train test split
     np.savez(
-        "trained_net_params/indices",
+        trained_param_dir / "indices",
         train_indices=train_indices,
         test_indices=test_indices,
     )
 
     # Upload to wandb
-    wandb.save("trained_net_params/state_encoder.pt")
-    wandb.save("trained_net_params/action_encoder.pt")
-    wandb.save("trained_net_params/transition_model.pt")
-    wandb.save("trained_net_params/state_decoder.pt")
-    wandb.save("trained_net_params/action_decoder.pt")
-    wandb.save("trained_net_params/indices.npz")
+    wandb.save(trained_param_dir / "state_encoder.pt")
+    wandb.save(trained_param_dir / "action_encoder.pt")
+    wandb.save(trained_param_dir / "transition_model.pt")
+    wandb.save(trained_param_dir / "state_decoder.pt")
+    wandb.save(trained_param_dir / "action_decoder.pt")
+    wandb.save(trained_param_dir / "indices.npz")
 
     # Check if this is a Vast.ai instance
     # Check if CONTAINER_API_KEY is set
@@ -749,7 +768,7 @@ def main(cfg):
         print("Stopping instance...")
         os.system(
             f"vastai stop instance {os.getenv('CONTAINER_ID')}"
-            + f"--api-key {os.getenv('CONTAINER_API_KEY')}"
+            + f" --api-key {os.getenv('CONTAINER_API_KEY')}"
         )
         print("Instance stopped?")
 

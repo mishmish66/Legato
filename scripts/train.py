@@ -766,83 +766,14 @@ def main(cfg):
     if in_vast:
         # Call "vastai stop instance $CONTAINER_ID" to stop the instance
         print("Stopping instance...")
-        os.system(
-            f"vastai stop instance {os.getenv('CONTAINER_ID')}"
-            + f" --api-key {os.getenv('CONTAINER_API_KEY')}"
+        command = (
+            f"vastai stop instance {os.getenv('CONTAINER_ID')}"  # Kill the instance
+            + f" --api-key {os.getenv('CONTAINER_API_KEY')}"  # Add the api key
         )
+        print("Running command:    " + command)
+        os.system(command)
         print("Instance stopped?")
 
 
 if __name__ == "__main__":
     main()
-
-# params = {
-#     "net_params": {
-#         "transition_model_params": {
-#             "n_layers": 3,
-#             "n_heads": 4,
-#             "pe_wavelength_range": [1, 2048],
-#         },
-#         "state_encoder_params": {
-#             "layer_sizes": [512, 1024, 512],
-#         },
-#         "action_encoder_params": {
-#             "layer_sizes": [512, 1024, 512],
-#         },
-#         "state_decoder_params": {
-#             "layer_sizes": [512, 1024, 512],
-#         },
-#         "action_decoder_params": {
-#             "layer_sizes": [512, 1024, 512],
-#         },
-#     },
-#     "action_space_size": 1.0,
-#     "state_space_size": 2.0,
-#     "loss_params": {
-#         "loss_weights": {
-#             "state_reconstruction": 1.0,
-#             "action_reconstruction": 1.0,
-#             "state_coverage": 0.1,
-#             "action_coverage": 0.1,
-#             "condensation": 10.0,
-#             "transition": 0.01,
-#             "smoothness": 0.1,
-#             "consistency": 1.0,
-#         },
-#         "state_coverage_loss_params": {
-#             "latent_samples": 4096,
-#             "selection_tail_size": 4,
-#             "far_sample_count": 64,
-#             "pushing_sample_size": 16,
-#         },
-#         "action_coverage_loss_params": {
-#             "latent_samples": 1024,
-#             "selection_tail_size": 4,
-#             "far_sample_count": 16,
-#             "pushing_sample_size": 64,
-#         },
-#         "consistency_loss_params": {
-#             "state_samples": 2048,
-#             "action_samples": 2048,
-#         },
-#     },
-#     "batching_params": {
-#         "transition_warmup_epochs": 1,
-#         "encoder_warmup_epochs": 2,
-#         "transition_finetune_epochs": 8,
-#         "encoder_batch_size": 4096,
-#         "transition_batch_size": 128,
-#         "encoder_grad_skips": 1,
-#         "encoder_epochs": 1,
-#         "transition_epochs": 1,
-#         "train_epochs": 256,
-#         "test_epoch_steps": 8,
-#         "epoch_state_actions": int(5e5),
-#         "epoch_trajectories": int(2.5e4),
-#         "train_proportion": 0.8,
-#     },
-#     "optimizer_params": {
-#         "encoder_lr": 5e-5,
-#         "transition_lr": 5e-5,
-#     },
-# }

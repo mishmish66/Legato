@@ -156,9 +156,8 @@ class ConsistencyLoss(nn.Module):
         latent_actions = self.latent_action_sampler(self.action_samples)
         latent_action_states = self.latent_state_sampler(self.action_samples)
 
-        action_states = self.state_decoder(latent_action_states)
         actions = self.action_decoder((latent_actions, latent_action_states))
-        recovered_latent_actions = self.action_encoder((actions, action_states))
+        recovered_latent_actions = self.action_encoder((actions, latent_action_states))
 
         states = self.state_decoder(latent_states)
         recovered_latent_states = self.state_encoder(states)

@@ -232,7 +232,7 @@ def train(
             transition_optimizer.zero_grad()
 
         flat_encoded_states = state_encoder(flat_states)
-        flat_encoded_actions = action_encoder((flat_actions, flat_states))
+        flat_encoded_actions = action_encoder((flat_actions, flat_encoded_states))
 
         flat_reconstructed_states = state_decoder(flat_encoded_states)
         flat_reconstructed_actions = action_decoder(
@@ -253,7 +253,7 @@ def train(
         traj_start_states = traj_states[torch.arange(len(traj_states)), traj_start_inds]
         traj_latent_start_states = state_encoder(traj_start_states)
         traj_latent_states = state_encoder(traj_states)
-        traj_latent_actions = action_encoder((traj_actions, traj_states))
+        traj_latent_actions = action_encoder((traj_actions, traj_latent_states))
 
         traj_latent_fut_states_prime, mask = transition_model(
             traj_latent_start_states,
@@ -331,7 +331,7 @@ def train(
         traj_start_states = traj_states[torch.arange(len(traj_states)), traj_start_inds]
         traj_latent_start_states = state_encoder(traj_start_states)
         traj_latent_states = state_encoder(traj_states)
-        traj_latent_actions = action_encoder((traj_actions, traj_states))
+        traj_latent_actions = action_encoder((traj_actions, traj_latent_states))
 
         traj_latent_fut_states_prime, mask = transition_model(
             traj_latent_start_states,
@@ -479,7 +479,7 @@ def train(
 
                 flat_encoded_states = state_encoder(flat_batch_states)
                 flat_encoded_actions = action_encoder(
-                    (flat_batch_actions, flat_batch_states)
+                    (flat_batch_actions, flat_encoded_states)
                 )
 
                 flat_reconstructed_states = state_decoder(flat_encoded_states)
@@ -506,7 +506,7 @@ def train(
                 traj_latent_start_states = state_encoder(traj_start_states)
                 traj_latent_states = state_encoder(batch_traj_states)
                 traj_latent_actions = action_encoder(
-                    (batch_traj_actions, batch_traj_states)
+                    (batch_traj_actions, traj_latent_states)
                 )
 
                 traj_latent_fut_states_prime, mask = transition_model(

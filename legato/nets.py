@@ -3,6 +3,8 @@ import torch
 import torch.nn as nn
 from einops import einsum, rearrange, repeat
 
+from legato.sampler import PBallSampler
+
 
 class Perceptron(nn.Module):
     def __init__(self, input_dim, layer_sizes, output_dim):
@@ -15,7 +17,41 @@ class Perceptron(nn.Module):
             ]
         )
 
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
     def forward(self, x):
+        for layer in self.layers[:-1]:
+            x = torch.relu(layer(x))
+        x = self.layers[-1](x)
+        return x
+
+
+class FreqLayer(nn.Module):
+    def __init__(self, freqs):
+        super().__init__()
+        self.freqs = freqs
+
+    @property
+    def device(self):
+        return self.freqs.device
+
+    def forward(self, x):
+        x_freq = einsum(x, self.freqs, "... d, ... w -> ... w d")
+        sines = torch.sin(x_freq)
+        cosines = torch.cos(x_freq)
+        y = rearrange([sines, cosines], "f ... w d -> ... (w d f)")
+        return y
+
+
+class Freqceptron(Perceptron):
+    def __init__(self, input_dim, layer_sizes, output_dim, freqs):
+        super().__init__(input_dim * 2 * len(freqs), layer_sizes, output_dim)
+        self.freq_layer = FreqLayer(freqs)
+
+    def forward(self, x):
+        x = self.freq_layer(x)
         for layer in self.layers[:-1]:
             x = torch.relu(layer(x))
         x = self.layers[-1](x)
@@ -118,6 +154,10 @@ class TransitionModel(nn.Module):
         else:
             return x
 
+    @property
+    def device(self):
+        return next(self.parameters()).device
+
 
 class ActorPolicy(nn.Module):
 
@@ -129,10 +169,14 @@ class ActorPolicy(nn.Module):
         transition_model,
         state_decoder,
         action_decoder,
+        optim_factory=torch.optim.SGD,
+        loss_func=nn.L1Loss(),
         lr=0.01,
         decay=0.01,
         horizon=128,
         iters=64,
+        tail_states=None,
+        discount=1.0,
     ):
         super().__init__()
         self.action_dim = action_dim
@@ -141,43 +185,59 @@ class ActorPolicy(nn.Module):
         self.transition_model = transition_model
         self.state_decoder = state_decoder
         self.action_decoder = action_decoder
+        self.action_sampler = PBallSampler(
+            action_dim, 1, action_space_size, device=action_decoder.device
+        )
+        self.optim_factory = optim_factory
+        self.loss_func = loss_func
         self.lr = lr
         self.decay = decay
         self.horizon = horizon
         self.iters = iters
+        self.tail_states = tail_states
+        self.discount = discount
 
     def forward(
-        self, state, target_state, prev_latent_action_plan=None, return_curve=False
+        self,
+        state,
+        target_state,
+        horizons,
+        prev_latent_action_plan=None,
+        return_curve=False,
     ):
-        def gen_latent_actions(leading_dim):
-            new_actions = torch.randn(
-                state.shape[0], leading_dim, self.action_dim, device=state.device
-            )
-            new_actions = new_actions / torch.norm(
-                new_actions, p=1, dim=-1, keepdim=True
-            )
-            new_actions = new_actions * torch.rand(
-                (*new_actions.shape[:-1], 1), device=state.device
-            )
-            new_actions = new_actions * self.action_space_size
-            return new_actions
 
+        max_horizon = horizons.max()
         if prev_latent_action_plan is None:
-            prev_latent_action_plan = gen_latent_actions(self.horizon)
+            n_samples = int(state.shape[0] * max_horizon)
+            prev_latent_action_plan = rearrange(
+                self.action_sampler(n_samples), "(n h) d -> n h d", n=state.shape[0]
+            )
+        else:
+            prev_latent_action_plan = prev_latent_action_plan.clone().detach()
 
-        latent_action_plan = torch.nn.Parameter(
-            prev_latent_action_plan.clone().detach()
+        max_horizon = max(max_horizon, prev_latent_action_plan.shape[-2])
+
+        n_samples = int(state.shape[0] * max_horizon)
+        latent_action_plan = rearrange(
+            self.action_sampler(n_samples), "(n h) d -> n h d", n=state.shape[0]
         )
+        latent_action_plan[..., : prev_latent_action_plan.shape[-2], :] = (
+            prev_latent_action_plan
+        )
+
+        latent_action_plan = torch.nn.Parameter(latent_action_plan.clone().detach())
 
         latent_state = self.state_encoder(state).detach()
         latent_target_state = self.state_encoder(target_state).detach()
 
-        optim = torch.optim.Adam([latent_action_plan], lr=self.lr)
+        optim = self.optim_factory([latent_action_plan], lr=self.lr)
         lr_sched = torch.optim.lr_scheduler.ExponentialLR(
             optim, self.decay ** (1 / self.iters)
         )
 
-        state_mse = nn.MSELoss()
+        use_action = (
+            torch.arange(0, max_horizon, device="cuda")[None] < horizons[..., None]
+        )
 
         loss_curve = []
 
@@ -185,8 +245,25 @@ class ActorPolicy(nn.Module):
             optim.zero_grad()
             latent_fut_states = self.transition_model(latent_state, latent_action_plan)
             fut_states = self.state_decoder(latent_fut_states)
-            fut_states[..., 2:] = 0.0
-            loss = state_mse(fut_states, target_state[..., None, :])
+            fut_states_filt = torch.where(
+                use_action[..., None], fut_states, target_state[..., None, :]
+            )[..., :2]
+            target_broad = repeat(
+                target_state, "... d -> ... t d", t=fut_states_filt.shape[-2]
+            )
+            # Use just the tail states if set
+            if self.tail_states is not None:
+                n_states = min(fut_states_filt.shape[-2], self.tail_states)
+                target_broad = target_broad[..., -n_states:, :]
+                fut_states_filt = fut_states_filt[..., -n_states:, :]
+
+            losses = self.loss_func(fut_states_filt, target_broad[..., :2])
+            times = torch.arange(0, max_horizon, device="cuda")
+            times = times[-losses.shape[-1] :]
+            discounts = torch.pow(self.discount, times)
+            discounted_losses = einsum(losses, discounts, "... e t, t -> ... e t")
+            loss = discounted_losses.mean()
+
             loss.backward()
             optim.step()
             lr_sched.step()
@@ -199,10 +276,10 @@ class ActorPolicy(nn.Module):
         next_action = self.action_decoder((latent_action_plan[..., 0, :], latent_state))
 
         # Pop the first action and append a new one
-        new_end_action = latent_action_plan[..., -1:, :]  # gen_latent_actions(1)
-        latent_action_plan = torch.cat(
-            [latent_action_plan[..., 1:, :], new_end_action], dim=-2
-        )
+        # new_end_action = latent_action_plan[..., -1:, :]  # gen_latent_actions(1)
+        latent_action_plan = latent_action_plan[..., 1:, :]  # torch.cat(
+        #     [latent_action_plan[..., 1:, :], new_end_action], dim=-2
+        # )
 
         if return_curve:
             return next_action.detach(), latent_action_plan.detach(), loss_curve

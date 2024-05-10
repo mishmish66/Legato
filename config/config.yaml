@@ -28,7 +28,7 @@ loss_params:
     state_coverage: 0.1
     action_coverage: 0.1
     condensation: 10.0
-    transition: 0.01
+    transition: 0.001
     smoothness: 0.1
     consistency: 1.0
   state_coverage_loss_params:
@@ -47,7 +47,7 @@ loss_params:
 
 batching_params:
   transition_warmup_epochs: 1
-  encoder_warmup_epochs: 2
+  encoder_warmup_epochs: 64
   transition_finetune_epochs: 8
   encoder_batch_size: 4096
   transition_batch_size: 128

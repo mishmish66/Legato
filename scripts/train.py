@@ -21,7 +21,7 @@ from legato.loss import (
     SmoothnessLoss,
     TransitionLoss,
 )
-from legato.nets import DoublePerceptron, Perceptron, TransitionModel
+from legato.nets import DoublePerceptron, Perceptron, TransitionModel, Freqceptron
 from legato.sampler import PBallSampler
 
 
@@ -629,19 +629,40 @@ def main(cfg):
         wandb.login(key=cfg.system_params.wandb_api_key)
 
     config_dict = OmegaConf.to_container(cfg)
-    wandb.init(project="legato", config=config_dict)
+    wandb.init(
+        project="legato",
+        config=config_dict,
+        mode="disabled" if cfg.system_params.wandb_api_key is None else "online",
+    )
 
     # Load data stuff
 
     if cfg.system_params.data_url is not None:
+        # make target destination for streaming (in memory)
+        dest = io.BytesIO()
+        chunk_size = 1024
+
+        resp = requests.get(cfg.system_params.data_url, stream=True)
+        total = int(resp.headers.get("content-length", 0))
+        with tqdm(
+            desc="Downloading data",
+            total=total,
+            unit="iB",
+            unit_scale=True,
+            unit_divisor=1024,
+        ) as bar:
+            for data in resp.iter_content(chunk_size=chunk_size):
+                size = dest.write(data)
+                bar.update(size)
         # Download the data from the url
         print(f"Downloading data from {cfg.system_params.data_url}...")
-        response = requests.get(cfg.system_params.data_url)
         # Load data from the response
         print("Loading data...")
-        data = np.load(io.BytesIO(response.content))
+        dest.seek(0)
+        data = np.load(dest)
         print("Data loaded.")
-        del response
+        del dest
+        del resp
 
     else:
         # Load data from data.npz
@@ -687,8 +708,21 @@ def main(cfg):
         pe_wavelength_range=cfg.net_params.transition_model_params.pe_wavelength_range,
     ).cuda()
 
-    state_encoder = Perceptron(
-        state_dim, cfg.net_params.state_encoder_params.layer_sizes, state_dim
+    freqs = torch.logspace(
+        start=np.log(0.1),
+        end=np.log(100),
+        steps=32,
+        base=torch.e,
+        device="cuda",
+    )
+    # state_encoder = Perceptron(
+    #     state_dim, cfg.net_params.state_encoder_params.layer_sizes, state_dim
+    # ).cuda()
+    state_encoder = Freqceptron(
+        state_dim,
+        cfg.net_params.state_encoder_params.layer_sizes,
+        state_dim,
+        freqs=freqs,
     ).cuda()
     action_encoder = DoublePerceptron(
         action_dim,
@@ -696,8 +730,14 @@ def main(cfg):
         cfg.net_params.action_encoder_params.layer_sizes,
         action_dim,
     ).cuda()
-    state_decoder = Perceptron(
-        state_dim, cfg.net_params.state_decoder_params.layer_sizes, state_dim
+    # state_decoder = Perceptron(
+    #     state_dim, cfg.net_params.state_decoder_params.layer_sizes, state_dim
+    # ).cuda()
+    state_decoder = Freqceptron(
+        state_dim,
+        cfg.net_params.state_decoder_params.layer_sizes,
+        state_dim,
+        freqs=freqs,
     ).cuda()
     action_decoder = DoublePerceptron(
         action_dim,

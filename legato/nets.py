@@ -240,6 +240,8 @@ class ActorPolicy(nn.Module):
         )
 
         loss_curve = []
+        
+        fut_states = None
 
         for i in range(self.iters):
             optim.zero_grad()
@@ -282,6 +284,6 @@ class ActorPolicy(nn.Module):
         # )
 
         if return_curve:
-            return next_action.detach(), latent_action_plan.detach(), loss_curve
+            return next_action.detach(), latent_action_plan.detach(), fut_states.detach(), loss_curve
         else:
-            return next_action.detach(), latent_action_plan.detach()
+            return next_action.detach(), latent_action_plan.detach(), fut_states.detach()

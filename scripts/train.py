@@ -7,7 +7,6 @@ import hydra
 import numpy as np
 import requests
 import torch
-import torch.autograd.profiler as profiler
 from einops import einsum, pack, rearrange, repeat
 from omegaconf import OmegaConf
 from torch import nn
@@ -21,7 +20,7 @@ from legato.loss import (
     SmoothnessLoss,
     TransitionLoss,
 )
-from legato.nets import DoublePerceptron, Perceptron, TransitionModel, Freqceptron
+from legato.nets import DoublePerceptron, Freqceptron, Perceptron, TransitionModel
 from legato.sampler import PBallSampler
 
 
@@ -749,33 +748,20 @@ def main(cfg):
     # Check if we are in a Vast.ai instance
     in_vast = os.getenv("CONTAINER_API_KEY") is not None
 
-    with profiler.profile(
-        enabled=False,
-        with_stack=True,
-        use_cuda=True,
-        profile_memory=True,
-    ) as prof:
-        train(
-            state_encoder,
-            action_encoder,
-            torch.compile(transition_model),
-            state_decoder,
-            action_decoder,
-            observations_train,
-            actions_train,
-            observations_test,
-            actions_test,
-            np_rng,
-            cfg,
-            in_vast,
-        )
-
-    # prof.export_chrome_trace("profile_results.json")
-    # print(
-    #     prof.key_averages(group_by_stack_n=5).table(
-    #         sort_by="self_cpu_time_total", row_limit=5
-    #     )
-    # )
+    train(
+        state_encoder,
+        action_encoder,
+        torch.compile(transition_model),
+        state_decoder,
+        action_decoder,
+        observations_train,
+        actions_train,
+        observations_test,
+        actions_test,
+        np_rng,
+        cfg,
+        in_vast,
+    )
 
     trained_param_dir = Path(__file__).parent.parent / "trained_net_params"
 
@@ -801,13 +787,16 @@ def main(cfg):
     wandb.save(trained_param_dir / "action_decoder.pt")
     wandb.save(trained_param_dir / "indices.npz")
 
+    # Block until all files are uploaded
+    wandb.finish()
+
     # Check if this is a Vast.ai instance
     # Check if CONTAINER_API_KEY is set
     if in_vast:
-        # Call "vastai stop instance $CONTAINER_ID" to stop the instance
-        print("Stopping instance...")
+        # Call "vastai destroy instance $CONTAINER_ID" to stop the instance
+        print("Killing instance...")
         command = (
-            f"vastai stop instance {os.getenv('CONTAINER_ID')}"  # Kill the instance
+            f"vastai destroy instance {os.getenv('CONTAINER_ID')}"  # Kill the instance
             + f" --api-key {os.getenv('CONTAINER_API_KEY')}"  # Add the api key
         )
         print("Running command:    " + command)

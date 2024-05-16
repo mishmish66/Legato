@@ -10,11 +10,11 @@ net_params:
     n_heads: 4
     pe_wavelength_range: [1, 2048]
   state_encoder_params:
-    layer_sizes: [512, 1024, 512]
+    layer_sizes: [1024, 512, 512]
   action_encoder_params:
     layer_sizes: [512, 1024, 512]
   state_decoder_params:
-    layer_sizes: [512, 1024, 512]
+    layer_sizes: [1024, 512, 512]
   action_decoder_params:
     layer_sizes: [512, 1024, 512]
 

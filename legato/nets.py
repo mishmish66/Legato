@@ -177,6 +177,9 @@ class ActorPolicy(nn.Module):
         iters=64,
         tail_states=None,
         discount=1.0,
+        temperature=0.0,
+        samples=1,
+        condensation_weight=1e3,
     ):
         super().__init__()
         self.action_dim = action_dim
@@ -196,6 +199,9 @@ class ActorPolicy(nn.Module):
         self.iters = iters
         self.tail_states = tail_states
         self.discount = discount
+        self.temperature = temperature
+        self.samples = samples
+        self.condensation_weight = condensation_weight
 
     def forward(
         self,
@@ -235,23 +241,41 @@ class ActorPolicy(nn.Module):
             optim, self.decay ** (1 / self.iters)
         )
 
+        horizons = repeat(horizons, "b ... -> (b s) ...", s=self.samples)
+        target_state = repeat(target_state, "b ... -> (b s) ...", s=self.samples)
+
         use_action = (
             torch.arange(0, max_horizon, device="cuda")[None] < horizons[..., None]
         )
 
         loss_curve = []
-        
+
         fut_states = None
 
         for i in range(self.iters):
             optim.zero_grad()
-            latent_fut_states = self.transition_model(latent_state, latent_action_plan)
+
+            # Perturb latent action plan with temperature
+            latent_repeat = repeat(
+                latent_action_plan, "b ... -> (b s) ...", s=self.samples
+            )
+            latent_state_repeat = repeat(
+                latent_state, "b ... -> (b s) ...", s=self.samples
+            )
+            latent_action_plan_pert = (
+                latent_repeat + torch.randn_like(latent_repeat) * self.temperature
+            )
+            latent_fut_states = self.transition_model(
+                latent_state_repeat, latent_action_plan_pert
+            )
             fut_states = self.state_decoder(latent_fut_states)
             fut_states_filt = torch.where(
                 use_action[..., None], fut_states, target_state[..., None, :]
             )[..., :2]
             target_broad = repeat(
-                target_state, "... d -> ... t d", t=fut_states_filt.shape[-2]
+                target_state,
+                "b ... d -> b ... t d",
+                t=fut_states_filt.shape[-2],
             )
             # Use just the tail states if set
             if self.tail_states is not None:
@@ -260,20 +284,37 @@ class ActorPolicy(nn.Module):
                 fut_states_filt = fut_states_filt[..., -n_states:, :]
 
             losses = self.loss_func(fut_states_filt, target_broad[..., :2])
+            # losses = losses[..., :2]
             times = torch.arange(0, max_horizon, device="cuda")
             times = times[-losses.shape[-1] :]
             discounts = torch.pow(self.discount, times)
             discounted_losses = einsum(losses, discounts, "... e t, t -> ... e t")
-            loss = discounted_losses.mean()
+
+            action_norms = torch.norm(latent_action_plan, dim=-1, p=1)
+            action_violations = torch.relu(action_norms - self.action_space_size)
+
+            loss = (
+                discounted_losses.mean()
+                + action_violations.mean() * self.condensation_weight
+            )
 
             loss.backward()
             optim.step()
             lr_sched.step()
 
+            # Clip the latent action plan
+            latent_action_plan.data = torch.clamp(
+                latent_action_plan.data, -self.action_space_size, self.action_space_size
+            )
+
             loss_curve.append(loss.item())
 
             if i == self.iters - 1:
-                print(loss.item())
+                print(
+                    f"Loss: {loss.item()}\n"
+                    + f"Undiscounted losses: {losses.mean().item()}\n"
+                    + f"Action violations: {action_violations.mean().item()}"
+                )
 
         next_action = self.action_decoder((latent_action_plan[..., 0, :], latent_state))
 
@@ -284,6 +325,15 @@ class ActorPolicy(nn.Module):
         # )
 
         if return_curve:
-            return next_action.detach(), latent_action_plan.detach(), fut_states.detach(), loss_curve
+            return (
+                next_action.detach(),
+                latent_action_plan.detach(),
+                fut_states.detach(),
+                loss_curve,
+            )
         else:
-            return next_action.detach(), latent_action_plan.detach(), fut_states.detach()
+            return (
+                next_action.detach(),
+                latent_action_plan.detach(),
+                fut_states.detach(),
+            )

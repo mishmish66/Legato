@@ -14,3 +14,5 @@ legato.egg-info/*
 writeup.pdf
 outputs
 outputs/*
+writeup.bbl
+writeup.blg

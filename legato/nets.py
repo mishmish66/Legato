@@ -180,6 +180,7 @@ class ActorPolicy(nn.Module):
         temperature=0.0,
         samples=1,
         condensation_weight=1e3,
+        silent=False,
     ):
         super().__init__()
         self.action_dim = action_dim
@@ -202,6 +203,7 @@ class ActorPolicy(nn.Module):
         self.temperature = temperature
         self.samples = samples
         self.condensation_weight = condensation_weight
+        self.silent = silent
 
     def forward(
         self,
@@ -309,7 +311,7 @@ class ActorPolicy(nn.Module):
 
             loss_curve.append(loss.item())
 
-            if i == self.iters - 1:
+            if i == self.iters - 1 and not self.silent:
                 print(
                     f"Loss: {loss.item()}\n"
                     + f"Undiscounted losses: {losses.mean().item()}\n"
